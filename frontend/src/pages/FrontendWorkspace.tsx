@@ -1,0 +1,267 @@
+import { useState } from 'react';
+import { motion } from 'framer-motion';
+import {
+  Code2,
+  FileCode,
+  FolderTree,
+  Download,
+  FileJson,
+  FileType,
+  CheckCircle2,
+  AlertTriangle,
+  RefreshCw,
+  Copy,
+  Eye,
+} from 'lucide-react';
+import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
+import { getSelectedProjectId } from '../lib/projectContext';
+import type { CodeFile } from '../types/unified';
+
+export function FrontendWorkspace() {
+  const [activeTab, setActiveTab] = useState<'overview' | 'files' | 'structure'>('overview');
+  const [selectedFile, setSelectedFile] = useState<CodeFile | null>(null);
+  const projectId = getSelectedProjectId();
+  const { getGeneratedCode, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
+
+  const frontendCode = getGeneratedCode('frontend');
+
+  const handleExport = async (format: 'json' | 'md') => {
+    if (!projectId || !frontendCode) return;
+    try {
+      const content = JSON.stringify(frontendCode, null, 2);
+      const blob = new Blob([content], { type: 'application/json' });
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = `frontend_code_${projectId}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(blobUrl);
+    } catch (e) {
+      console.error('Export failed:', e);
+    }
+  };
+
+  const handleCopyCode = (file: CodeFile) => {
+    navigator.clipboard.writeText(file.content);
+  };
+
+  if (!projectId) {
+    return (
+      <div className="space-y-6">
+        <Card className="py-10 text-center">
+          <AlertTriangle className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+          <p className="text-sm font-medium text-text-primary">No project selected</p>
+          <p className="text-xs text-text-muted mt-1">Select a project in the Dashboard to view frontend code.</p>
+        </Card>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <Card className="py-10 text-center">
+          <RefreshCw className="h-10 w-10 text-ey-yellow animate-spin mx-auto mb-3" />
+          <p className="text-sm text-text-muted">Loading frontend code...</p>
+        </Card>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-6">
+        <Card className="border-status-error/30 bg-status-error/5 text-sm text-status-error">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4" />
+            {error}
+            <button onClick={reload} className="ml-auto underline hover:no-underline">Retry</button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  if (!frontendCode) {
+    return (
+      <div className="space-y-6">
+        <Card className="py-10 text-center">
+          <Code2 className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+          <p className="text-sm text-text-muted">No frontend code generated yet.</p>
+          <p className="text-xs text-text-muted mt-1">Run the Frontend Agent to generate React components and pages.</p>
+        </Card>
+      </div>
+    );
+  }
+
+  const metrics = [
+    { label: 'Framework', value: frontendCode.framework || 'N/A', icon: Code2, color: 'text-status-info' },
+    { label: 'Modules', value: frontendCode.modules?.length || 0, icon: FolderTree, color: 'text-status-success' },
+    { label: 'Files', value: frontendCode.files?.length || 0, icon: FileCode, color: 'text-status-warning' },
+    { label: 'Lines', value: frontendCode.files?.reduce((acc, f) => acc + (f.content?.split('\n').length || 0), 0) || 0, icon: Code2, color: 'text-ey-yellow' },
+  ];
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-text-primary">Frontend Workspace</h1>
+          <p className="mt-1 text-sm text-text-muted">React components, pages, and application code</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <StatusBadge status="success">
+            <CheckCircle2 className="mr-1 h-3 w-3" />
+            Code Generated
+          </StatusBadge>
+          <button onClick={reload} className="btn-ghost text-sm" disabled={loading}>
+            <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+          <div className="flex items-center gap-1">
+            <button onClick={() => handleExport('json')} className="btn-ghost text-xs" title="Export JSON">
+              <FileJson className="h-3.5 w-3.5" />
+            </button>
+            <button onClick={() => handleExport('md')} className="btn-ghost text-xs" title="Export Markdown">
+              <FileType className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Metrics row */}
+      <div className="grid gap-3 md:grid-cols-4">
+        {metrics.map((metric) => (
+          <Card key={metric.label} className="text-center py-3">
+            <metric.icon className={`h-5 w-5 ${metric.color} mx-auto mb-1`} />
+            <p className="text-xl font-bold text-text-primary">{metric.value}</p>
+            <p className="text-[10px] text-text-muted">{metric.label}</p>
+          </Card>
+        ))}
+      </div>
+
+      {/* Tabs */}
+      <div className="flex border-b border-dark-border">
+        {[
+          { id: 'overview', label: 'Overview', icon: Eye },
+          { id: 'files', label: 'Files', icon: FileCode },
+          { id: 'structure', label: 'Structure', icon: FolderTree },
+        ].map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id as typeof activeTab)}
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === tab.id
+                ? 'border-ey-yellow text-ey-yellow'
+                : 'border-transparent text-text-muted hover:text-text-primary'
+            }`}
+          >
+            <tab.icon className="h-4 w-4" />
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Overview tab */}
+      {activeTab === 'overview' && (
+        <Card>
+          <div className="flex items-center gap-2 mb-4">
+            <Eye className="h-5 w-5 text-ey-yellow" />
+            <h3 className="text-lg font-semibold text-text-primary">Project Overview</h3>
+          </div>
+          <div className="space-y-4">
+            <div>
+              <h4 className="text-sm font-medium text-text-primary mb-2">Framework</h4>
+              <p className="text-sm text-text-secondary">{frontendCode.framework}</p>
+            </div>
+            <div>
+              <h4 className="text-sm font-medium text-text-primary mb-2">Implementation</h4>
+              <p className="text-sm text-text-secondary">{frontendCode.implementation}</p>
+            </div>
+            <div>
+              <h4 className="text-sm font-medium text-text-primary mb-2">Modules</h4>
+              <div className="flex flex-wrap gap-2">
+                {frontendCode.modules?.map((module, idx) => (
+                  <span key={idx} className="text-xs px-3 py-1 rounded-full bg-status-info/10 text-status-info">{module}</span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Files tab */}
+      {activeTab === 'files' && (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Card>
+            <div className="flex items-center gap-2 mb-4">
+              <FileCode className="h-5 w-5 text-ey-yellow" />
+              <h3 className="text-lg font-semibold text-text-primary">Generated Files</h3>
+            </div>
+            <div className="space-y-2">
+              {frontendCode.files?.map((file, idx) => (
+                <div
+                  key={idx}
+                  onClick={() => setSelectedFile(file)}
+                  className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-colors ${
+                    selectedFile === file ? 'bg-ey-yellow/10 border border-ey-yellow' : 'bg-dark-bg border border-dark-border hover:border-dark-border-light'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <FileCode className="h-4 w-4 text-ey-yellow" />
+                    <div>
+                      <p className="text-sm font-medium text-text-primary">{file.name}</p>
+                      <p className="text-[10px] text-text-muted">{file.path}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleCopyCode(file); }}
+                    className="p-1 rounded hover:bg-dark-surface text-text-muted hover:text-ey-yellow"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          {selectedFile && (
+            <Card>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-text-primary">{selectedFile.name}</h3>
+                <button onClick={() => handleCopyCode(selectedFile)} className="btn-ghost text-xs">
+                  <Copy className="mr-1 h-3 w-3" />
+                  Copy
+                </button>
+              </div>
+              <pre className="bg-dark-bg p-4 rounded-lg overflow-auto max-h-96 text-xs text-text-secondary">
+                <code>{selectedFile.content}</code>
+              </pre>
+            </Card>
+          )}
+        </div>
+      )}
+
+      {/* Structure tab */}
+      {activeTab === 'structure' && (
+        <Card>
+          <div className="flex items-center gap-2 mb-4">
+            <FolderTree className="h-5 w-5 text-ey-yellow" />
+            <h3 className="text-lg font-semibold text-text-primary">Project Structure</h3>
+          </div>
+          <div className="space-y-2">
+            {frontendCode.modules?.map((module, idx) => (
+              <div key={idx} className="flex items-center gap-2 p-2 rounded-lg bg-dark-bg">
+                <FolderTree className="h-4 w-4 text-ey-yellow" />
+                <span className="text-sm text-text-primary">{module}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}

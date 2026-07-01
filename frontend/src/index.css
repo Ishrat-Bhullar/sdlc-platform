@@ -1,0 +1,173 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #333333 #111111;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: #111111;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: #333333;
+    border-radius: 3px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: #444444;
+  }
+
+  body {
+    @apply bg-dark-bg text-text-primary antialiased;
+  }
+
+  ::selection {
+    background: rgba(255, 230, 0, 0.3);
+    color: #FFFFFF;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-dark-card border border-dark-border rounded-lg p-4;
+  }
+
+  .card-hover {
+    @apply hover:bg-dark-cardHover hover:border-dark-border-light transition-all duration-200;
+  }
+
+  .btn-primary {
+    @apply bg-ey-yellow text-dark-bg font-semibold px-4 py-2 rounded-lg
+           hover:bg-ey-yellow-dark transition-all duration-200
+           active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply bg-dark-card border border-dark-border text-text-primary font-medium px-4 py-2 rounded-lg
+           hover:bg-dark-cardHover hover:border-dark-border-light transition-all duration-200;
+  }
+
+  .btn-ghost {
+    @apply text-text-secondary hover:text-text-primary hover:bg-dark-card
+           px-3 py-1.5 rounded-lg transition-all duration-200;
+  }
+
+  .input-field {
+    @apply bg-dark-card border border-dark-border text-text-primary
+           placeholder-text-muted px-4 py-2.5 rounded-lg
+           focus:outline-none focus:border-ey-yellow focus:ring-1 focus:ring-ey-yellow/30
+           transition-all duration-200;
+  }
+
+  .status-badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .status-badge-success {
+    @apply bg-status-success/10 text-status-success border border-status-success/20;
+  }
+
+  .status-badge-warning {
+    @apply bg-status-warning/10 text-status-warning border border-status-warning/20;
+  }
+
+  .status-badge-error {
+    @apply bg-status-error/10 text-status-error border border-status-error/20;
+  }
+
+  .status-badge-info {
+    @apply bg-status-info/10 text-status-info border border-status-info/20;
+  }
+
+  .section-title {
+    @apply text-lg font-semibold text-text-primary mb-4;
+  }
+
+  .nav-item {
+    @apply flex items-center gap-3 px-3 py-2 rounded-lg text-text-secondary
+           hover:text-text-primary hover:bg-dark-card transition-all duration-200
+           cursor-pointer;
+  }
+
+  .nav-item-active {
+    @apply text-ey-yellow bg-dark-card border-l-2 border-ey-yellow;
+  }
+
+  .code-block {
+    @apply bg-dark-bg border border-dark-border rounded-lg p-4
+           font-mono text-sm text-text-primary overflow-x-auto;
+  }
+
+  .progress-bar {
+    @apply h-1.5 bg-dark-border rounded-full overflow-hidden;
+  }
+
+  .progress-bar-fill {
+    @apply h-full bg-ey-yellow rounded-full transition-all duration-500;
+  }
+
+  .glow-effect {
+    @apply shadow-[0_0_15px_rgba(255,230,0,0.15)];
+  }
+
+  .agent-activity {
+    @apply text-xs font-mono text-text-muted;
+  }
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply bg-gradient-to-r from-ey-yellow to-ey-yellow-dark
+           bg-clip-text text-transparent;
+  }
+
+  .animate-fade-in {
+    animation: fadeIn 0.3s ease-in-out;
+  }
+
+  .animate-slide-in {
+    animation: slideIn 0.3s ease-out;
+  }
+
+  .animate-scale-in {
+    animation: scaleIn 0.2s ease-out;
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

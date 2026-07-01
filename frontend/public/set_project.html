@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<html>
+<head><script>
+localStorage.setItem('selectedProjectId','3');
+const dest = new URLSearchParams(location.search).get('to') || '/app/dashboard';
+window.location.replace(dest);
+</script></head>
+<body>Selecting project 3...</body>
+</html>

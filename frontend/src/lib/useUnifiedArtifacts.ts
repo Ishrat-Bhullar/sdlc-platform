@@ -1,0 +1,331 @@
+/**
+ * useUnifiedArtifacts.ts
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Unified hook for all artifact operations.
+ * Single source of truth for fetching, parsing, and managing artifacts.
+ */
+
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { apiRequest, FASTAPI_BASE_URL } from './api';
+import { getSelectedProjectId } from './projectContext';
+import type {
+  Artifact,
+  ArtifactType,
+  RequirementsContent,
+  UserStoriesContent,
+  ArchitectureContent,
+  DatabaseSchemaContent,
+  ApiDesignContent,
+  UIUXDesignContent,
+  SecurityReportContent,
+  ComplianceReportContent,
+  GeneratedCodeContent,
+  TestReportContent,
+  DocumentationContent,
+} from '../types/unified';
+
+function parseContent(raw: string | Record<string, unknown>): Record<string, unknown> {
+  if (raw === null || raw === undefined) return {};
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return { raw_text: raw };
+    }
+  }
+  return raw as Record<string, unknown>;
+}
+
+export interface UseUnifiedArtifactsReturn {
+  artifacts: Artifact[];
+  loading: boolean;
+  error: string | null;
+  reload: () => Promise<void>;
+
+  // Typed getters for each artifact type
+  getRequirements: () => RequirementsContent | null;
+  getUserStories: () => UserStoriesContent | null;
+  getArchitecture: () => ArchitectureContent | null;
+  getDatabaseSchema: () => DatabaseSchemaContent | null;
+  getApiDesign: () => ApiDesignContent | null;
+  getUIUXDesign: () => UIUXDesignContent | null;
+  getSecurityReport: () => SecurityReportContent | null;
+  getComplianceReport: () => ComplianceReportContent | null;
+  getGeneratedCode: (type: 'frontend' | 'backend') => GeneratedCodeContent | null;
+  getTestReport: () => TestReportContent | null;
+  getDocumentation: () => DocumentationContent | null;
+
+  // Generic getter
+  getArtifact: (type: ArtifactType) => Record<string, unknown> | null;
+  getRawArtifact: (type: ArtifactType) => Artifact | null;
+
+  // Approval status
+  getApprovalStatus: (type: ArtifactType) => string | null;
+  isApproved: (type: ArtifactType) => boolean;
+
+  // Download
+  downloadArtifact: (type: ArtifactType, format?: string) => Promise<void>;
+}
+
+export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifactsReturn {
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const requestProjectIdRef = useRef<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!projectId) {
+      setArtifacts([]);
+      requestProjectIdRef.current = null;
+      return;
+    }
+
+    requestProjectIdRef.current = projectId;
+    setLoading(true);
+    setError(null);
+
+    try {
+      const data = await apiRequest<Artifact[]>(`/generated_artifacts?project_id=${projectId}`);
+      if (requestProjectIdRef.current === projectId) {
+        const normalized: Artifact[] = (data || []).map((a) => ({
+          ...a,
+          content: typeof a.content === 'string' ? a.content : JSON.stringify(a.content),
+        }));
+        setArtifacts(normalized);
+      }
+    } catch (e) {
+      if (requestProjectIdRef.current === projectId) {
+        setError(e instanceof Error ? e.message : 'Failed to load artifacts');
+      }
+    } finally {
+      if (requestProjectIdRef.current === projectId) {
+        setLoading(false);
+      }
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    requestProjectIdRef.current = projectId;
+    setArtifacts([]);
+  }, [projectId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const getArtifact = useCallback(
+    (type: ArtifactType): Record<string, unknown> | null => {
+      const match = artifacts.find((a) => a.artifact_type === type);
+      if (!match) return null;
+      return parseContent(match.content);
+    },
+    [artifacts]
+  );
+
+  const getRawArtifact = useCallback(
+    (type: ArtifactType): Artifact | null => {
+      return artifacts.find((a) => a.artifact_type === type) ?? null;
+    },
+    [artifacts]
+  );
+
+  const getApprovalStatus = useCallback(
+    (type: ArtifactType): string | null => {
+      const artifact = artifacts.find((a) => a.artifact_type === type);
+      return artifact?.approval_status || null;
+    },
+    [artifacts]
+  );
+
+  const isApproved = useCallback(
+    (type: ArtifactType): boolean => {
+      return getApprovalStatus(type) === 'Approved';
+    },
+    [getApprovalStatus]
+  );
+
+  const downloadArtifact = useCallback(
+    async (type: ArtifactType, format = 'txt') => {
+      const artifact = getRawArtifact(type);
+      if (!artifact) {
+        throw new Error('Artifact not found');
+      }
+
+      const url = `${FASTAPI_BASE_URL}/documents/download/${artifact.id}`;
+      const resp = await fetch(url, { credentials: 'include' });
+      if (!resp.ok) throw new Error('Download failed');
+
+      const blob = await resp.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = `${type}_${artifact.id}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(blobUrl);
+    },
+    [getRawArtifact]
+  );
+
+  // Typed getters
+  const getRequirements = useCallback((): RequirementsContent | null => {
+    const data = getArtifact('requirements_doc');
+    if (!data) return null;
+    return {
+      requirements: (data.requirements as any[]) || [],
+      assumptions: (data.assumptions as string[]) || [],
+      risks: (data.risks as string[]) || [],
+      dependencies: (data.dependencies as any[]) || [],
+      summary: (data.summary as Record<string, unknown>) || {},
+    };
+  }, [getArtifact]);
+
+  const getUserStories = useCallback((): UserStoriesContent | null => {
+    const data = getArtifact('user_stories');
+    if (!data) return null;
+    return {
+      epics: (data.epics as any[]) || [],
+      total_stories: (data.total_stories as number) || 0,
+    };
+  }, [getArtifact]);
+
+  const getArchitecture = useCallback((): ArchitectureContent | null => {
+    const data = getArtifact('architecture_diagram') || getArtifact('architecture_proposals');
+    if (!data) return null;
+    return {
+      architecture_summary: (data.architecture_summary as string) || (data.justification as string) || '',
+      pattern: (data.pattern as string) || '',
+      microservices: (data.microservices as any[]) || (data.services as any[]) || [],
+      components: (data.components as any[]) || (data.services as any[]) || [],
+      diagrams: Array.isArray(data.diagrams) ? data.diagrams as any[] : Object.entries((data.diagrams as Record<string, string>) || {}).map(([type, content]) => ({ type, content })),
+      tech_stack: (data.tech_stack as Record<string, string>) || (data.techStack as Record<string, string>) || {},
+    };
+  }, [getArtifact]);
+
+  const getDatabaseSchema = useCallback((): DatabaseSchemaContent | null => {
+    const data = getArtifact('sql_schema') || getArtifact('database_schema');
+    if (!data) return null;
+    return {
+      tables: (data.tables as any[]) || [],
+      relationships: (data.relationships as any[]) || [],
+      sql_ddl: (data.sql_ddl as string) || (data.migrationSQL as string) || '',
+    };
+  }, [getArtifact]);
+
+  const getApiDesign = useCallback((): ApiDesignContent | null => {
+    const data = getArtifact('api_design');
+    if (!data) return null;
+    return {
+      api_style: (data.api_style as 'REST' | 'GraphQL' | 'gRPC') || 'REST',
+      base_url: (data.base_url as string) || '',
+      endpoints: (data.endpoints as any[]) || [],
+      openapi_yaml: (data.openapi_yaml as string) || '',
+    };
+  }, [getArtifact]);
+
+  const getUIUXDesign = useCallback((): UIUXDesignContent | null => {
+    const data = getArtifact('uiux_design') || getArtifact('ui_ux_design');
+    if (!data) return null;
+    return {
+      screens: (data.screens as string[]) || [],
+      userFlows: (data.userFlows as string[]) || [],
+      wireframes: (data.wireframes as string[]) || [],
+      componentRecommendations: (data.componentRecommendations as string[]) || [],
+      uxRecommendations: (data.uxRecommendations as string[]) || [],
+    };
+  }, [getArtifact]);
+
+  const getSecurityReport = useCallback((): SecurityReportContent | null => {
+    const data = getArtifact('security_report') || getArtifact('security_architecture');
+    if (!data) return null;
+    return {
+      securityArchitecture: (data.securityArchitecture as any) || {},
+      threatModel: (data.threatModel as string[]) || [],
+      authentication: (data.authentication as any) || {},
+      authorization: (data.authorization as any) || {},
+      securityControls: (data.securityControls as string[]) || [],
+      securityChecklist: (data.securityChecklist as string[]) || [],
+    };
+  }, [getArtifact]);
+
+  const getComplianceReport = useCallback((): ComplianceReportContent | null => {
+    const data = getArtifact('compliance_report') || getArtifact('compliance_architecture');
+    if (!data) return null;
+    return {
+      complianceAssessment: (data.complianceAssessment as any) || {},
+      governanceControls: (data.governanceControls as string[]) || [],
+      auditRequirements: (data.auditRequirements as string[]) || [],
+      dataRetentionPolicies: (data.dataRetentionPolicies as string[]) || [],
+      riskAssessment: (data.riskAssessment as string[]) || [],
+    };
+  }, [getArtifact]);
+
+  const getGeneratedCode = useCallback(
+    (type: 'frontend' | 'backend'): GeneratedCodeContent | null => {
+      const artifactType = type === 'frontend' ? 'react_code' : 'backend_code';
+      const data = getArtifact(artifactType);
+      if (!data) return null;
+      return {
+        framework: (data.framework as string) || '',
+        modules: (data.modules as string[]) || [],
+        implementation: (data.implementation as string) || '',
+        files: (data.files as any[]) || [],
+      };
+    },
+    [getArtifact]
+  );
+
+  const getTestReport = useCallback((): TestReportContent | null => {
+    const data = getArtifact('test_report');
+    if (!data) return null;
+    return {
+      summary: (data.summary as string) || '',
+      suites: (data.suites as string[]) || [],
+      status: (data.status as 'passed' | 'failed' | 'pending') || 'pending',
+      coverage_targets: (data.coverage_targets as Record<string, number>) || {},
+    };
+  }, [getArtifact]);
+
+  const getDocumentation = useCallback((): DocumentationContent | null => {
+    const data = getArtifact('documentation');
+    if (!data) return null;
+    return {
+      documents: (data.documents as string[]) || [],
+      format: (data.format as 'Markdown' | 'PDF' | 'HTML') || 'Markdown',
+      status: (data.status as 'generated' | 'pending' | 'failed') || 'pending',
+    };
+  }, [getArtifact]);
+
+  return {
+    artifacts,
+    loading,
+    error,
+    reload: load,
+    getRequirements,
+    getUserStories,
+    getArchitecture,
+    getDatabaseSchema,
+    getApiDesign,
+    getUIUXDesign,
+    getSecurityReport,
+    getComplianceReport,
+    getGeneratedCode,
+    getTestReport,
+    getDocumentation,
+    getArtifact,
+    getRawArtifact,
+    getApprovalStatus,
+    isApproved,
+    downloadArtifact,
+  };
+}
+
+/**
+ * Convenience hook using the currently selected project from context.
+ */
+export function useSelectedProjectArtifacts() {
+  const projectId = getSelectedProjectId();
+  return useUnifiedArtifacts(projectId);
+}

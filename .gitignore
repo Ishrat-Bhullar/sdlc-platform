@@ -1,0 +1,35 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.env
+
+# Node
+node_modules/
+frontend/dist/
+
+# AI Models
+gfpgan/weights/
+*.pth
+
+# Local storage
+storage/
+
+# Claude
+.claude/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Databases
+*.db
+
+# Logs
+*.log
+
+# Python cache
+.pytest_cache/
+.mypy_cache/

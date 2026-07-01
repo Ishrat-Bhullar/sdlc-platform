@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head><title>Debug</title></head>
+<body style="background:#111;color:#fff;font-family:monospace;padding:20px">
+<h2>LocalStorage State</h2>
+<pre id="out"></pre>
+<script>
+const data = {};
+for(let i=0;i<localStorage.length;i++){
+  const k=localStorage.key(i);
+  data[k]=localStorage.getItem(k);
+}
+document.getElementById('out').textContent = JSON.stringify(data,null,2);
+</script>
+</body>
+</html>
