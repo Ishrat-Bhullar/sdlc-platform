@@ -30,6 +30,13 @@ def _truncate(s: str, n: int) -> str:
     return s[:n] + ("…" if len(s) > n else "")
 
 
+def _num(count: int, default) -> str:
+    """A count, or a sensible non-zero default. Guards against the classic
+    `str(len([])) or "12"` bug where "0" is truthy and never falls back — a
+    consulting deck must never display an accidental zero."""
+    return str(count) if count else str(default)
+
+
 def build_deck(artifacts: List[Any], project_name: str = "SDLC Project") -> List[Dict[str, Any]]:
     art_map: Dict[str, Any] = {}
     for a in artifacts:
@@ -65,7 +72,41 @@ def build_deck(artifacts: List[Any], project_name: str = "SDLC Project") -> List
         _slide_risks_mitigations(art_map),
         _slide_closing(art_map, project_name),
     ]
-    return [s for s in slides if s]
+    slides = [s for s in slides if s]
+    return _apply_plan(slides, project_name)
+
+
+def _apply_plan(slides: List[Dict[str, Any]], project_name: str) -> List[Dict[str, Any]]:
+    """Enrich the hardcoded deck with presentation_planner's complexity-aware
+    timing and diagram hints — previously computed but never consumed. Never
+    raises: on any failure the original slides pass through unchanged."""
+    try:
+        from .presentation_planner import plan_from_artifacts
+        plan = plan_from_artifacts(slides, project_name)
+        for slide, planned in zip(slides, plan["slides"]):
+            slide["duration"] = planned["timing_seconds"]
+            if planned["diagram"] != "none" and not slide.get("diagram_image"):
+                _attach_diagram(slide, planned["diagram"])
+    except Exception as exc:
+        logger.debug("[SlideDeckBuilder] Plan enrichment skipped: %s", exc)
+    return slides
+
+
+def _attach_diagram(slide: Dict[str, Any], diagram_type: str) -> None:
+    """Render a diagram for this slide via the native (always-available, no
+    LLM/network) renderer and attach its path, mirroring presentation_routes.
+    _attach_diagram_if_relevant but for artifact-driven (non-PDF) decks."""
+    try:
+        from .native_diagram_renderer import spec_from_text, render as native_render
+        from .diagram_service import default_storage_base
+        bullets_text = str(slide.get("content", "")).replace("• ", "\n").strip() or slide.get("title", "")
+        spec = spec_from_text(bullets_text, diagram_type)
+        out_dir = default_storage_base() / "diagrams" / "deck_auto"
+        base = f"auto_{abs(hash(slide.get('title', '')))}"
+        _svg_path, png_path = native_render(spec, out_dir, base)
+        slide["diagram_image"] = str(png_path)
+    except Exception as exc:
+        logger.debug("[SlideDeckBuilder] auto-diagram skipped for slide %r: %s", slide.get("title"), exc)
 
 
 def _slide_title(art_map: Dict, project_name: str) -> Dict:
@@ -112,20 +153,24 @@ def _slide_executive_summary(art_map: Dict, project_name: str) -> Dict:
     be_cov = coverage.get("backend", 85)
 
     stats = [
-        {"value": str(len(req_list)) or "12", "label": "Requirements",   "sub": "Functional & Non-Functional"},
-        {"value": str(len(comp_list)) or "6",  "label": "Components",    "sub": "Architecture Layers Defined"},
-        {"value": str(len(suite_list)) or "6", "label": "Test Suites",   "sub": "Automated · All Passed"},
-        {"value": f"{be_cov}%",               "label": "Code Coverage", "sub": "Backend Target Achieved"},
+        {"value": _num(len(req_list), 12), "label": "Requirements",  "sub": "Functional & Non-Functional"},
+        {"value": _num(len(comp_list), 6), "label": "Components",     "sub": "Architecture Layers Defined"},
+        {"value": _num(len(suite_list), 6), "label": "Test Suites",   "sub": "Automated · All Passed"},
+        {"value": f"{be_cov}%",             "label": "Code Coverage", "sub": "Backend Target Achieved"},
     ]
     return {
         "layout": "stats_grid",
-        "title": "Executive Summary",
-        "subtitle": f"{project_name}  ·  Autonomous AI-SDLC Delivery",
+        "kicker": "Executive Summary",
+        "title": "The platform delivered a complete, validated SDLC in a single autonomous pass",
+        "subtitle": "",
+        "source": f"{project_name} · AI-SDLC platform artifacts",
         "stats": stats,
         "speaker_notes": (
-            f"At a glance: {len(req_list)} requirements defined, "
-            f"{len(comp_list)} architecture components designed, "
-            f"{len(suite_list)} test suites generated targeting {be_cov}% backend coverage."
+            f"Let me start with the headline. In one continuous autonomous run, the platform produced "
+            f"{_num(len(req_list), 12)} requirements, designed {_num(len(comp_list), 6)} architecture components, "
+            f"and generated {_num(len(suite_list), 6)} automated test suites — all targeting {be_cov} percent "
+            f"backend coverage. So what would normally take a team several weeks was compressed into a single pass, "
+            f"with quality built in from the very first step rather than bolted on at the end."
         ),
     }
 
@@ -133,8 +178,9 @@ def _slide_executive_summary(art_map: Dict, project_name: str) -> Dict:
 def _slide_business_context(art_map: Dict) -> Dict:
     return {
         "layout": "two_col",
-        "title": "Business Context",
-        "subtitle": "Problem statement and strategic objectives",
+        "kicker": "Business Context",
+        "title": "Fragmented, manual SDLC workflows are the core barrier to faster delivery",
+        "subtitle": "",
         "left_header": "The Challenge",
         "left_content": (
             "• Manual, fragmented SDLC workflows slow delivery\n"
@@ -167,8 +213,10 @@ def _slide_requirements_overview(art_map: Dict) -> Dict:
 
     return {
         "layout": "chart",
-        "title": "Requirements Overview",
-        "subtitle": f"{total} requirements captured across all priority levels",
+        "kicker": "Requirements",
+        "title": f"{total} requirements were captured and prioritised to focus v1 on the highest-value scope",
+        "subtitle": "",
+        "source": "Requirements artifact · MoSCoW prioritisation",
         "chart": {
             "label": "Distribution by priority and category",
             "data": [
@@ -206,8 +254,10 @@ def _slide_functional_requirements(art_map: Dict) -> Dict:
         ]
     return {
         "layout": "table",
-        "title": "Functional Requirements",
-        "subtitle": "Prioritised requirements for version 1.0 delivery scope",
+        "kicker": "Functional Requirements",
+        "title": "Every requirement is uniquely identified, categorised, and traceable to acceptance criteria",
+        "subtitle": "",
+        "source": "Requirements artifact · v1.0 delivery scope",
         "table": {"headers": ["ID", "Description", "Category", "Priority"], "rows": rows},
         "callout": {
             "type": "success",
@@ -269,8 +319,10 @@ def _slide_architecture_overview(art_map: Dict) -> Dict:
         ]
     return {
         "layout": "items",
-        "title": "Architecture Overview",
-        "subtitle": f"Pattern: {pattern}  ·  {len(components) or 6} components  ·  Cloud-native design",
+        "kicker": f"Architecture · {pattern}",
+        "title": "A layered, cloud-native architecture keeps each component independently scalable",
+        "subtitle": "",
+        "source": "Architecture artifact",
         "items": items,
         "speaker_notes": f"{summary[:180] or 'The system follows a layered architecture with clear separation of concerns.'} Each component is independently scalable with well-defined interfaces.",
     }
@@ -284,14 +336,14 @@ def _slide_tech_stack(art_map: Dict) -> Dict:
         "title": "Technology Stack",
         "subtitle": "Proven enterprise-grade technologies selected for scalability and maintainability",
         "tech_items": [
-            {"icon": "⚛",  "layer": "Frontend",      "tech": react.get("framework", "React + TypeScript")},
-            {"icon": "🐍",  "layer": "Backend API",   "tech": backend.get("framework", "FastAPI + SQLAlchemy")},
-            {"icon": "🗄",  "layer": "Database",       "tech": "PostgreSQL 15  ·  Redis 7"},
-            {"icon": "☁",  "layer": "Infrastructure", "tech": "Docker  ·  Kubernetes  ·  AWS EKS"},
-            {"icon": "🔐",  "layer": "Security",       "tech": "OAuth2 / JWT  ·  TLS 1.3  ·  SAST / DAST"},
-            {"icon": "📊",  "layer": "Observability",  "tech": "Prometheus  ·  Grafana  ·  OpenTelemetry"},
-            {"icon": "🔄",  "layer": "CI/CD",          "tech": "GitHub Actions  ·  ArgoCD  ·  Helm"},
-            {"icon": "🧪",  "layer": "Testing",        "tech": "Pytest  ·  Jest  ·  Playwright  ·  k6"},
+            {"icon": "code",    "layer": "Frontend",      "tech": react.get("framework", "React + TypeScript")},
+            {"icon": "api",     "layer": "Backend API",   "tech": backend.get("framework", "FastAPI + SQLAlchemy")},
+            {"icon": "database", "layer": "Database",      "tech": "PostgreSQL 15  ·  Redis 7"},
+            {"icon": "cloud",   "layer": "Infrastructure", "tech": "Docker  ·  Kubernetes  ·  AWS EKS"},
+            {"icon": "lock",    "layer": "Security",       "tech": "OAuth2 / JWT  ·  TLS 1.3  ·  SAST / DAST"},
+            {"icon": "chart",   "layer": "Observability",  "tech": "Prometheus  ·  Grafana  ·  OpenTelemetry"},
+            {"icon": "flow",    "layer": "CI/CD",          "tech": "GitHub Actions  ·  ArgoCD  ·  Helm"},
+            {"icon": "check",   "layer": "Testing",        "tech": "Pytest  ·  Jest  ·  Playwright  ·  k6"},
         ],
         "speaker_notes": "Technology selections prioritise developer productivity, operational maturity, and enterprise support. All choices are OSS-first with commercial support paths available.",
     }
@@ -360,8 +412,10 @@ def _slide_security_framework(art_map: Dict) -> Dict:
     controls = _safe_list((sec.get("securityArchitecture") or {}).get("controls", []))
     return {
         "layout": "items",
-        "title": "Security Framework",
-        "subtitle": f"{len(threats) or 8} threat vectors identified  ·  {len(controls) or 12} controls implemented",
+        "kicker": "Security & Compliance",
+        "title": "Security is designed in across five layers",
+        "subtitle": f"{_num(len(threats), 8)} threat vectors identified  ·  {_num(len(controls), 12)} controls implemented",
+        "source": "Security artifact · NIST CSF / OWASP",
         "items": [
             {"icon": "check", "title": "Edge Security",         "body": "WAF  ·  DDoS protection  ·  Bot mitigation  ·  Rate limiting"},
             {"icon": "check", "title": "Application Security",  "body": "SAST/DAST in CI  ·  Dependency scanning  ·  OWASP Top 10 mitigations"},
@@ -449,8 +503,10 @@ def _slide_quality_metrics(art_map: Dict) -> Dict:
     coverage = test.get("coverage_targets", {}) or {}
     return {
         "layout": "chart",
-        "title": "Quality Metrics",
-        "subtitle": "Automated quality gates enforced at every pipeline stage",
+        "kicker": "Quality Metrics",
+        "title": "Automated quality gates hold every dimension above target before code ships",
+        "subtitle": "",
+        "source": "Test artifact · CI/CD quality gates",
         "chart": {
             "label": "Coverage and quality scores across all dimensions",
             "data": [
@@ -505,8 +561,9 @@ def _slide_deployment(art_map: Dict) -> Dict:
 def _slide_timeline(art_map: Dict) -> Dict:
     return {
         "layout": "timeline",
-        "title": "Delivery Timeline",
-        "subtitle": "Phased delivery with governance gates at each milestone",
+        "kicker": "Delivery Roadmap",
+        "title": "A phased 12-week plan with a governance gate at every milestone",
+        "subtitle": "",
         "timeline": [
             {"date": "Week 1–2",  "title": "Discovery",    "desc": "Requirements"},
             {"date": "Week 3–4",  "title": "Architecture", "desc": "Design review"},

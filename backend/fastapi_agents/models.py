@@ -437,6 +437,7 @@ class DocumentUploadResponse(BaseModel):
     document_id: int
     upload_status: str
     project_reference: int
+    extracted_chars: int = 0
 
 
 class AgentRunOut(BaseModel):

@@ -17,6 +17,115 @@ import {
 } from 'lucide-react';
 import { Card, StatusBadge } from '../components/ui/Card';
 import { useAuth } from '../lib/auth';
+import { fastApiRequest } from '../lib/api';
+import { useEffect } from 'react';
+
+interface AiModelInfo {
+  active_model: string;
+  fallback_chain: string[];
+  preferred: { id: string; label: string }[];
+  installed: string[];
+}
+
+function AiModelSettings() {
+  const [info, setInfo] = useState<AiModelInfo | null>(null);
+  const [selected, setSelected] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const [testOk, setTestOk] = useState(false);
+
+  const testConnection = async () => {
+    setTesting(true); setTestResult(null);
+    try {
+      const r = await fastApiRequest<{ ok: boolean; message: string }>(
+        '/settings/ai-model/test', { method: 'POST', body: { model: selected } });
+      setTestOk(!!r.ok); setTestResult(r.message);
+    } catch {
+      setTestOk(false); setTestResult('Could not reach the local model endpoint.');
+    }
+    setTesting(false);
+  };
+
+  useEffect(() => {
+    fastApiRequest<AiModelInfo>('/settings/ai-model')
+      .then((d) => { setInfo(d); setSelected(d.active_model); })
+      .catch(() => setInfo({ active_model: '', fallback_chain: [], preferred: [
+        { id: 'qwen3:32b', label: 'Qwen3 32B (best quality)' },
+        { id: 'qwen3:14b', label: 'Qwen3 14B (balanced)' },
+        { id: 'deepseek-r1:14b', label: 'DeepSeek R1 14B (reasoning)' },
+      ], installed: [] }));
+  }, []);
+
+  const save = async () => {
+    setSaving(true); setSaved(false);
+    try {
+      await fastApiRequest('/settings/ai-model', { method: 'POST', body: { model: selected } });
+      setSaved(true);
+    } catch { /* surfaced by UI state */ }
+    setSaving(false);
+  };
+
+  const isInstalled = (id: string) => info?.installed?.some(
+    (n) => n === id || n.split(':')[0] === id.split(':')[0]);
+
+  return (
+    <Card>
+      <h3 className="section-title">Local AI Model</h3>
+      <p className="text-xs text-text-muted mb-4">
+        All generation runs locally through Ollama. Pick the primary model; the platform
+        automatically falls back down the chain (Qwen3 32B → 14B → DeepSeek R1) if a model isn't installed.
+      </p>
+      <div className="space-y-3">
+        {(info?.preferred || []).map((m) => {
+          const active = selected === m.id;
+          const installed = isInstalled(m.id);
+          return (
+            <button key={m.id} onClick={() => setSelected(m.id)}
+              className={`flex items-center gap-3 rounded-lg border p-4 text-left transition-all w-full ${active ? 'border-ey-yellow bg-ey-yellow/10' : 'border-dark-border bg-dark-bg hover:border-dark-border-light'}`}>
+              <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${active ? 'bg-ey-yellow/20' : 'bg-dark-card'}`}>
+                <Boxes className={`h-5 w-5 ${active ? 'text-ey-yellow' : 'text-text-secondary'}`} />
+              </div>
+              <div className="flex-1">
+                <p className={`text-sm font-medium ${active ? 'text-ey-yellow' : 'text-text-primary'}`}>{m.label}</p>
+                <p className="text-xs text-text-muted mt-0.5 font-mono">{m.id}</p>
+              </div>
+              <StatusBadge status={installed ? 'success' : 'idle'}>
+                {installed ? 'Installed' : 'Not pulled'}
+              </StatusBadge>
+              {active && <Check className="h-4 w-4 text-ey-yellow flex-shrink-0" />}
+            </button>
+          );
+        })}
+      </div>
+      {info?.fallback_chain?.length ? (
+        <div className="mt-4 text-xs text-text-muted">
+          <span className="font-medium text-text-secondary">Fallback chain: </span>
+          {info.fallback_chain.filter(Boolean).join('  →  ')}
+        </div>
+      ) : null}
+      <div className="mt-5 flex items-center gap-3">
+        <button onClick={save} disabled={saving || !selected}
+          className="flex items-center gap-2 rounded-lg bg-ey-yellow px-4 py-2 text-sm font-semibold text-dark-bg hover:opacity-90 disabled:opacity-50">
+          {saving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          {saved ? 'Saved as Default' : 'Save as Default'}
+        </button>
+        <button onClick={testConnection} disabled={testing}
+          className="flex items-center gap-2 rounded-lg border border-dark-border px-4 py-2 text-sm font-medium text-text-secondary hover:border-ey-yellow/40 disabled:opacity-50">
+          {testing ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+          Test Connection
+        </button>
+      </div>
+      {testResult && (
+        <div className={`mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${testOk ? 'border-status-success/30 bg-status-success/5 text-status-success' : 'border-status-error/30 bg-status-error/5 text-status-error'}`}>
+          {testOk ? <Check className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" /> : null}
+          <span>{testResult}</span>
+        </div>
+      )}
+    </Card>
+  );
+}
 
 const settingsSections = [
   { id: 'profile', name: 'Profile', icon: User },
@@ -25,6 +134,7 @@ const settingsSections = [
   { id: 'appearance', name: 'Appearance', icon: Palette },
   { id: 'integrations', name: 'Integrations', icon: Globe },
   { id: 'build-type', name: 'Build Type', icon: Boxes },
+  { id: 'ai-model', name: 'Local AI Model', icon: Boxes },
   { id: 'byok', name: 'BYOK Settings', icon: Key },
   { id: 'api', name: 'API Keys', icon: Key },
 ];
@@ -304,6 +414,8 @@ export function Settings() {
               </div>
             </Card>
           )}
+
+          {activeSection === 'ai-model' && <AiModelSettings />}
 
           {activeSection === 'byok' && (
             <Card>

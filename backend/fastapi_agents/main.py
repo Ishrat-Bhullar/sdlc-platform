@@ -95,6 +95,30 @@ CORS_ALLOWED_ORIGINS = [
 ACCESS_COOKIE_NAME = "access_token"
 REFRESH_COOKIE_NAME = "refresh_token"
 
+def _extract_document_text(path) -> str:
+    """Extract plain text from an uploaded BRD/RFP document (PDF or DOCX) so
+    ingestion actually grounds the pipeline in the real document content.
+    Falls back gracefully (empty string) for unsupported/unreadable files —
+    upload still succeeds, it just won't enrich the project description."""
+    from pathlib import Path as _Path
+    p = _Path(path)
+    suffix = p.suffix.lower()
+    try:
+        if suffix == ".pdf":
+            import pdfplumber
+            with pdfplumber.open(str(p)) as pdf:
+                return "\n\n".join((page.extract_text() or "") for page in pdf.pages)
+        if suffix in (".docx", ".doc"):
+            import docx  # python-docx
+            d = docx.Document(str(p))
+            return "\n".join(para.text for para in d.paragraphs)
+        if suffix in (".txt", ".md"):
+            return p.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        logger.warning("[Ingestion] _extract_document_text failed for %s: %s", p.name, exc)
+    return ""
+
+
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 # In DEMO_MODE, all paths bypass auth — the sentinel value "*" is checked below.
 DEMO_AUTH_BYPASS_ALL = True  # set to False to require login even in demo
@@ -410,10 +434,31 @@ def upload_document(
         stage=f"Document Uploaded: {file.filename}",
         status=RunStatus.COMPLETED.value,
     ))
+
+    # Extract real document text (PDF/DOCX) and fold it into the project
+    # description so the agent pipeline is actually grounded in the uploaded
+    # BRD/RFP content, not just whatever free-text the user typed at creation.
+    extracted_chars = 0
+    try:
+        extracted = _extract_document_text(destination)
+        if extracted.strip():
+            extracted_chars = len(extracted)
+            existing = (project.description or "").strip()
+            marker = f"\n\n--- Uploaded document: {file.filename} ---\n"
+            project.description = (existing + marker + extracted[:12000]).strip()
+            db.add(TimelineEvent(
+                project_id=project_id,
+                stage=f"Document Ingested: {file.filename} ({extracted_chars} chars extracted)",
+                status=RunStatus.COMPLETED.value,
+            ))
+    except Exception as exc:
+        logger.warning("[Ingestion] Text extraction failed for %s: %s", file.filename, exc)
+
     db.commit()
     db.refresh(document)
 
-    return {"document_id": document.id, "upload_status": "success", "project_reference": project_id}
+    return {"document_id": document.id, "upload_status": "success", "project_reference": project_id,
+            "extracted_chars": extracted_chars}
 
 
 # ===========================================================================

@@ -661,7 +661,7 @@ def _extract_mode(cfg: Any, default: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Video Generation Pipeline (fully local — Coqui XTTS / Piper + LibreOffice
-# + MoviePy/FFmpeg, no cloud APIs, no API keys, works completely offline)
+# + FFmpeg, no cloud APIs, no API keys, works completely offline)
 # ---------------------------------------------------------------------------
 # Additive extension — does NOT modify DirectorAgent / LogicAgent / ReviewAgent
 # / PresentationVideoAgent above. It consumes their *output* (pptx bytes +
@@ -676,7 +676,7 @@ def _extract_mode(cfg: Any, default: str) -> str:
 # removed per updated requirements — the pipeline must have zero external API
 # dependencies and run fully offline. What remains is exactly the local chain:
 # LLM content (already produced) -> PPTX -> slide images -> local TTS
-# narration -> MoviePy/FFmpeg composition -> presentation.mp4.
+# narration -> FFmpeg composition -> presentation.mp4.
 
 from ..services.video_generation_service import (
     VoiceConfig,
@@ -714,7 +714,7 @@ class VideoGenerationPipeline:
         generating_voice    — per-slide local TTS narration (Coqui XTTS,
                                falling back to Piper)
         rendering_slides    — PPTX -> per-slide PNG images (LibreOffice + pdf2image)
-        composing_video     — slide images + narration -> MP4 (MoviePy/FFmpeg)
+        composing_video     — slide images + narration -> MP4 (FFmpeg)
         completed           — presentation.mp4 is ready
     """
 
@@ -783,9 +783,13 @@ class VideoGenerationPipeline:
         result.video_available = True
 
         try:
-            from moviepy.editor import VideoFileClip  # type: ignore
-            with VideoFileClip(str(narrated_path)) as vc:
-                result.duration_seconds = vc.duration
+            import subprocess
+            probe = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", str(narrated_path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            result.duration_seconds = float(probe.stdout.strip())
         except Exception:
             logger.debug("[VideoGenerationPipeline] Could not probe video duration", exc_info=True)
 

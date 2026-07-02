@@ -8,3 +8,23 @@ passlib[bcrypt]==1.7.4
 cryptography==43.0.1
 python-multipart==0.0.9
 email-validator==2.2.0
+# Presentation & video generation (PPTX build + slide rasterisation + FFmpeg video compose)
+python-pptx==1.0.2
+Pillow>=12.2.0
+pdf2image>=1.17.0
+requests>=2.31.0
+# System binaries required at runtime: libreoffice (soffice), ffmpeg, ffprobe, poppler (pdftoppm)
+# Video composition is pure FFmpeg (no MoviePy) — see video_pipeline_local.py / video_generation_service.py
+# Default TTS tier: edge-tts (free, no API key, Microsoft neural voices — tried
+# before the macOS `say`/espeak-ng fallback below since it sounds noticeably
+# more human). Needs outbound network access to Microsoft's public TTS
+# endpoint but no account/key. Set DISABLE_EDGE_TTS=1 to force fully-offline.
+edge-tts>=7.0.0
+# Fallback TTS: macOS `say` (primary) or espeak-ng (fallback) — no extra packages required
+#
+# Optional: "Human Avatar" presenter (SadTalker AI lip-sync). Not required for the default
+# Cartoon / Voice Only / No Presenter modes. Install only if you need real talking-head video:
+#   pip install torch torchvision facexlib gfpgan kornia face_alignment yacs pydub basicsr
+# Note: basicsr 1.4.2 imports torchvision.transforms.functional_tensor, removed in newer
+# torchvision. If you hit that ImportError, patch site-packages/basicsr/data/degradations.py:
+#   functional_tensor -> functional (see backend/fastapi_agents/video_pipeline_local.py::sadtalker_status)

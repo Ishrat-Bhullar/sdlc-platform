@@ -52,22 +52,53 @@ VOICES: Dict[str, Dict[str, str]] = {
     "tom":       {"name": "Tom",       "lang": "en-US", "label": "Tom — Male, American (deep)"},
 }
 
+# Free, no-API-key Microsoft neural voices (via the `edge-tts` package), mapped
+# onto the same voice_id options the frontend already exposes. Tried before
+# macOS `say`/espeak-ng since it sounds meaningfully more human.
+EDGE_TTS_VOICES: Dict[str, str] = {
+    "samantha": "en-US-AriaNeural",
+    "alex":     "en-US-GuyNeural",
+    "victoria": "en-US-JennyNeural",
+    "daniel":   "en-GB-RyanNeural",
+    "karen":    "en-AU-NatashaNeural",
+    "moira":    "en-IE-EmilyNeural",
+    "tom":      "en-US-ChristopherNeural",
+}
+
 THEMES: Dict[str, Dict[str, Any]] = {
+    # Authentic EY palette — charcoal 2E2E38 + signature yellow FFE600.
+    # `ey` (light canvas) is the flagship, matching the downloadable .pptx.
+    "ey": {
+        "label": "EY Consulting",
+        "bg":            (255, 255, 255),
+        "accent":        (255, 230,   0),
+        "title_color":   (46,  46,  56),
+        "body_color":    (58,  58,  69),
+        "muted_color":   (116, 116, 128),
+        "bar_color":     (46,  46,  56),
+        "footer_color":  (255, 255, 255),
+        "stripe_color":  (246, 246, 250),
+        "table_header":  (46,  46,  56),
+        "table_alt":     (242, 242, 246),
+        "success_color": (45,  183,  87),
+        "warning_color": (255, 152,  49),
+        "info_color":    (24,  140, 229),
+    },
     "ey_dark": {
         "label": "EY Dark",
-        "bg":            (26,  26,  46),
-        "accent":        (255, 230,  0),
+        "bg":            (46,  46,  56),
+        "accent":        (255, 230,   0),
         "title_color":   (255, 255, 255),
-        "body_color":    (200, 200, 215),
-        "muted_color":   (120, 120, 145),
-        "bar_color":     (255, 230,  0),
-        "footer_color":  (46,  46,  80),
-        "stripe_color":  (38,  38,  62),
-        "table_header":  (255, 230,  0),
-        "table_alt":     (38,  38,  65),
-        "success_color": (80, 200, 120),
-        "warning_color": (255, 165,  0),
-        "info_color":    (100, 160, 255),
+        "body_color":    (222, 222, 226),
+        "muted_color":   (155, 155, 168),
+        "bar_color":     (255, 230,   0),
+        "footer_color":  (35,  35,  43),
+        "stripe_color":  (58,  58,  69),
+        "table_header":  (255, 230,   0),
+        "table_alt":     (58,  58,  69),
+        "success_color": (45,  183,  87),
+        "warning_color": (255, 152,  49),
+        "info_color":    (79,  195, 247),
     },
     "ey_light": {
         "label": "EY Light",
@@ -123,10 +154,13 @@ THEMES: Dict[str, Dict[str, Any]] = {
 
 def _load_font(size: int, bold: bool = False):
     from PIL import ImageFont
+    # Avenir Next is the closest metric match to EYInterstate; prefer it so
+    # the video frames read like the downloadable EY .pptx.
     candidates = [
+        ("/System/Library/Fonts/Avenir Next.ttc",   3 if bold else 0),
         ("/System/Library/Fonts/HelveticaNeue.ttc", 1 if bold else 0),
         ("/System/Library/Fonts/Helvetica.ttc",     0),
-        ("/System/Library/Fonts/Avenir Next.ttc",   3 if bold else 0),
+        ("/Library/Fonts/Arial Bold.ttf" if bold else "/Library/Fonts/Arial.ttf", None),
         ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", None),
     ]
     for path, idx in candidates:
@@ -943,32 +977,199 @@ class PillowSlideRenderer:
 
 # ── Local TTS service ────────────────────────────────────────────────────────
 
+# Emotion presets tune pacing + pitch so narration sounds like a real
+# consultant, not a flat TTS engine. Values are relative multipliers/offsets.
+EMOTION_PRESETS: Dict[str, Dict[str, float]] = {
+    "confident":  {"rate": 1.00, "pitch": 0.98, "pause": 1.0},   # measured, authoritative
+    "professional": {"rate": 1.00, "pitch": 1.00, "pause": 1.0},
+    "warm":       {"rate": 0.95, "pitch": 1.02, "pause": 1.15},  # friendly, unhurried
+    "energetic":  {"rate": 1.12, "pitch": 1.05, "pause": 0.8},   # upbeat pitch/demo
+    "calm":       {"rate": 0.90, "pitch": 0.99, "pause": 1.25},  # slow, reassuring
+    "authoritative": {"rate": 0.94, "pitch": 0.95, "pause": 1.1},
+}
+
+
+# Narration-style presets shift the emotion + pacing to match the audience —
+# an Executive readout sounds different from a Technical deep-dive.
+NARRATION_STYLE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "executive":   {"emotion": "authoritative", "pause": 1.15},
+    "consultant":  {"emotion": "confident", "pause": 1.1},
+    "professional": {"emotion": "professional", "pause": 1.0},
+    "friendly":    {"emotion": "warm", "pause": 1.15},
+    "technical":   {"emotion": "calm", "pause": 1.05},
+}
+
+
+@dataclass
+class VoiceControls:
+    """Human-like delivery controls exposed to the frontend voice panel.
+    speed / pitch / volume are relative multipliers around 1.0; emotion +
+    narration_style pick pacing/intonation presets; pause_scale and emphasis
+    fine-tune rhythm. Backwards compatible: callers that only pass a voice_id
+    still get sensible, consultant-grade defaults."""
+    voice_id: str = "samantha"
+    speed: float = 1.0          # 0.5 – 1.5 (1.0 = natural consultant pace)
+    pitch: float = 1.0          # 0.8 – 1.2
+    volume: float = 1.0         # 0.0 – 1.5
+    emotion: str = "confident"
+    narration_style: str = "consultant"  # executive|consultant|professional|friendly|technical
+    pause_scale: float = 1.0    # 0.6 – 1.6 — length of pauses between sentences
+    emphasis: float = 1.0       # 0.6 – 1.4 — how much key phrases are stressed
+    base_rate: int = 172        # words/min at speed=1.0 — deliberately unhurried
+
+    def resolved_emotion(self) -> str:
+        style = NARRATION_STYLE_PRESETS.get(str(self.narration_style).lower())
+        # An explicitly-set emotion wins; otherwise derive it from the style.
+        if self.emotion and self.emotion != "confident":
+            return self.emotion
+        return style["emotion"] if style else self.emotion
+
+    def resolved_pause(self) -> float:
+        style = NARRATION_STYLE_PRESETS.get(str(self.narration_style).lower())
+        return self.pause_scale * (style["pause"] if style else 1.0)
+
+
 class LocalTTSService:
-    """TTS using macOS `say` → espeak-ng → ffmpeg silence (never fails)."""
+    """TTS using macOS `say` → espeak-ng → ffmpeg silence (never fails).
 
-    def synthesize(self, text: str, out_path: Path, voice_id: str = "samantha", rate: int = 180) -> Path:
+    Delivery is humanised: a slower default cadence, sentence-level pauses for
+    natural rhythm, and post-processing for pitch/volume so the result sounds
+    like a confident presenter rather than a robotic reader."""
+
+    def synthesize(
+        self,
+        text: str,
+        out_path: Path,
+        voice_id: str = "samantha",
+        rate: int | None = None,
+        controls: "VoiceControls | None" = None,
+    ) -> Path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        voice_name = VOICES.get(voice_id, VOICES["samantha"])["name"]
+        vc = controls or VoiceControls(voice_id=voice_id)
+        if rate is not None and controls is None:  # legacy callers
+            vc.base_rate = rate
+        voice_name = VOICES.get(vc.voice_id, VOICES["samantha"])["name"]
 
-        if self._try_macos_say(text, voice_name, rate, out_path):
+        preset = EMOTION_PRESETS.get(str(vc.resolved_emotion()).lower(), EMOTION_PRESETS["confident"])
+        eff_rate = int(max(90, min(260, vc.base_rate * vc.speed * preset["rate"])))
+        spoken = self._humanize(text, preset["pause"] * vc.resolved_pause())
+
+        if self._try_edge_tts(text, vc, preset, out_path):
+            return out_path
+        if self._try_macos_say(spoken, voice_name, eff_rate, out_path, vc, preset):
             return out_path
         if self._try_espeak(text, out_path):
             return out_path
         duration = max(3.0, len(text.split()) / 2.5)
         return self._gen_silence(duration, out_path)
 
-    def _try_macos_say(self, text: str, voice: str, rate: int, out_path: Path) -> bool:
+    @classmethod
+    def _prep_for_edge_tts(cls, text: str) -> str:
+        """Same acronym/symbol normalisation as _humanize, minus the macOS
+        `say`-specific [[slnc N]] pause markup (edge-tts would read that
+        literally) — its neural voices already pause naturally on punctuation."""
+        t = " ".join((text or "").split())
+        if not t:
+            return "."
+        for a, b in cls._SPEAK_SUBS:
+            t = t.replace(a, b)
+        return " ".join(t.split())
+
+    def _try_edge_tts(self, text: str, vc: "VoiceControls", preset: dict, out_path: Path) -> bool:
+        """Free, no-API-key Microsoft neural voices — tried first since they
+        sound meaningfully more human than macOS `say`/espeak-ng. Requires
+        outbound network access to Microsoft's public TTS endpoint (no
+        account/key); set DISABLE_EDGE_TTS=1 to force fully-offline operation."""
+        if os.getenv("DISABLE_EDGE_TTS"):
+            return False
+        try:
+            import edge_tts
+        except ImportError:
+            return False
+        try:
+            import asyncio
+            voice = EDGE_TTS_VOICES.get(vc.voice_id, "en-US-AriaNeural")
+            rate_pct = max(-50, min(50, int(round((vc.speed * preset.get("rate", 1.0) - 1.0) * 100))))
+            pitch_hz = max(-50, min(50, int(round((vc.pitch * preset.get("pitch", 1.0) - 1.0) * 50))))
+            spoken = self._prep_for_edge_tts(text)
+            mp3_path = out_path.with_suffix(".edge.mp3")
+
+            async def _run():
+                communicate = edge_tts.Communicate(
+                    spoken, voice, rate=f"{rate_pct:+d}%", pitch=f"{pitch_hz:+d}Hz",
+                )
+                await communicate.save(str(mp3_path))
+
+            asyncio.run(_run())
+            if not mp3_path.exists() or mp3_path.stat().st_size == 0:
+                return False
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(mp3_path), "-ar", "44100", "-ac", "1", str(out_path)],
+                check=True, capture_output=True, timeout=30,
+            )
+            mp3_path.unlink(missing_ok=True)
+            return True
+        except Exception as e:
+            logger.debug("[TTS] edge-tts failed: %s", e)
+            return False
+
+    # Presentation symbols and terse tokens that a TTS engine mispronounces if
+    # left raw — normalised to how a consultant would actually say them.
+    _SPEAK_SUBS = [
+        # Compound/acronym expansions first (before bare-symbol replacements).
+        ("CI/CD", "C I C D"), ("e.g.", "for example"), ("i.e.", "that is"),
+        ("etc.", "and so on"), ("APIs", "A P Is"), ("API", "A P I"),
+        ("SDLC", "S D L C"), ("RBAC", "R BACK"), ("KPI", "K P I"),
+        ("ROI", "R O I"), ("SLA", "S L A"), ("MFA", "M F A"),
+        ("UI", "U I"), ("UX", "U X"), ("p95", "P ninety-five"),
+        # Symbol softening.
+        ("·", ", "), ("—", ", "), ("–", ", "), ("•", ", "),
+        ("→", " leads to "), ("&", " and "), ("%", " percent"), ("/", " "),
+    ]
+
+    @classmethod
+    def _humanize(cls, text: str, pause_scale: float) -> str:
+        """Prepare narration for natural spoken delivery: expand/soften symbols
+        and acronyms, then insert macOS `say` inline pauses for rhythm — a beat
+        after sentences, a shorter one after commas / colons."""
+        import re as _re
+        t = " ".join((text or "").split())
+        if not t:
+            return "."
+        for a, b in cls._SPEAK_SUBS:
+            t = t.replace(a, b)
+        t = " ".join(t.split())  # collapse doubled spaces from substitutions
+        sent_pause = int(340 * pause_scale)
+        comma_pause = int(160 * pause_scale)
+        t = _re.sub(r"([.!?])\s+", rf"\1 [[slnc {sent_pause}]] ", t)
+        t = _re.sub(r"([,;:])\s+", rf"\1 [[slnc {comma_pause}]] ", t)
+        return t
+
+    def _try_macos_say(self, text: str, voice: str, rate: int, out_path: Path,
+                       vc: "VoiceControls | None" = None,
+                       preset: dict | None = None) -> bool:
         if not shutil.which("say"):
             return False
         try:
             aiff_path = out_path.with_suffix(".aiff")
             subprocess.run(
                 ["say", "-v", voice, "-r", str(rate), "-o", str(aiff_path), text],
-                check=True, capture_output=True, timeout=60,
+                check=True, capture_output=True, timeout=90,
             )
+            # Post-process pitch + volume for expressive, human delivery.
+            filters = []
+            pitch = (vc.pitch if vc else 1.0) * (preset.get("pitch", 1.0) if preset else 1.0)
+            if abs(pitch - 1.0) > 0.01:
+                # Shift pitch without changing tempo: resample then restore rate.
+                filters.append(f"asetrate=44100*{pitch:.3f},aresample=44100,atempo={1.0/pitch:.3f}")
+            vol = vc.volume if vc else 1.0
+            if abs(vol - 1.0) > 0.01:
+                filters.append(f"volume={max(0.0, min(2.0, vol)):.2f}")
+            af = ["-af", ",".join(filters)] if filters else []
             subprocess.run(
-                ["ffmpeg", "-y", "-i", str(aiff_path), "-ar", "44100", "-ac", "1", str(out_path)],
-                check=True, capture_output=True, timeout=30,
+                ["ffmpeg", "-y", "-i", str(aiff_path), *af,
+                 "-ar", "44100", "-ac", "1", str(out_path)],
+                check=True, capture_output=True, timeout=45,
             )
             aiff_path.unlink(missing_ok=True)
             return True
@@ -997,10 +1198,107 @@ class LocalTTSService:
         return out_path
 
 
+# ── High-fidelity PPTX frame renderer ─────────────────────────────────────────
+
+class PptxFrameRenderer:
+    """Rasterises the *actual* generated .pptx into 1920×1080 frames via
+    LibreOffice (PPTX → PDF → PNG). This guarantees the video is pixel-identical
+    to the downloadable EY deck and supports every layout the deck supports
+    (architecture, process, comparison, roadmap, …) — which the lightweight
+    Pillow renderer does not. Falls back gracefully (returns None) when
+    LibreOffice/poppler are unavailable, so the pipeline can drop back to
+    PillowSlideRenderer."""
+
+    def __init__(self, dpi: int = 144):  # 13.333in × 144 = 1920px exactly
+        self.dpi = dpi
+        self._soffice = shutil.which("soffice") or shutil.which("libreoffice")
+
+    @property
+    def available(self) -> bool:
+        return bool(self._soffice)
+
+    def render_all(self, slides: List[Dict[str, Any]], theme_id: str,
+                   project_name: str, work_dir: Path) -> Optional[List[Any]]:
+        if not self.available:
+            return None
+        try:
+            from PIL import Image  # noqa: F401
+            from fastapi_agents.pptx_builder import build_pptx_from_deck
+        except Exception as exc:
+            logger.warning("[PptxFrameRenderer] deps unavailable: %s", exc)
+            return None
+
+        try:
+            work_dir.mkdir(parents=True, exist_ok=True)
+            pptx_path = work_dir / "deck.pptx"
+            pptx_path.write_bytes(
+                build_pptx_from_deck(slides, project_name, theme_id=theme_id)
+            )
+            subprocess.run(
+                [self._soffice, "--headless", "--norestore", "--convert-to", "pdf",
+                 "--outdir", str(work_dir), str(pptx_path)],
+                check=True, capture_output=True, timeout=240,
+            )
+            pdf_path = work_dir / "deck.pdf"
+            if not pdf_path.exists():
+                logger.warning("[PptxFrameRenderer] LibreOffice produced no PDF")
+                return None
+            images = self._pdf_to_images(pdf_path, work_dir)
+            if not images or len(images) < len(slides):
+                logger.warning("[PptxFrameRenderer] frame count %d < slides %d",
+                               len(images) if images else 0, len(slides))
+                # still usable if counts match closely; else bail
+                if not images:
+                    return None
+            return images
+        except Exception as exc:
+            logger.warning("[PptxFrameRenderer] render failed, falling back: %s", exc)
+            return None
+
+    def _pdf_to_images(self, pdf_path: Path, work_dir: Path) -> List[Any]:
+        from PIL import Image
+        # Prefer pdf2image (poppler); fall back to pdftoppm CLI.
+        try:
+            from pdf2image import convert_from_path
+            imgs = convert_from_path(str(pdf_path), dpi=self.dpi)
+            return [self._fit(i) for i in imgs]
+        except Exception:
+            pass
+        if shutil.which("pdftoppm"):
+            prefix = work_dir / "frame"
+            subprocess.run(
+                ["pdftoppm", "-png", "-r", str(self.dpi), str(pdf_path), str(prefix)],
+                check=True, capture_output=True, timeout=180,
+            )
+            frames = sorted(work_dir.glob("frame*.png"))
+            return [self._fit(Image.open(f)) for f in frames]
+        return []
+
+    @staticmethod
+    def _fit(img):
+        from PIL import Image
+        if img.size != (SLIDE_W, SLIDE_H):
+            img = img.convert("RGB").resize((SLIDE_W, SLIDE_H), Image.LANCZOS)
+        return img.convert("RGB")
+
+
 # ── FFmpeg video composer ─────────────────────────────────────────────────────
 
 class FFmpegComposer:
-    """Stitches per-slide PNG + WAV pairs into a final MP4 using FFmpeg."""
+    """Stitches per-slide PNG + WAV pairs into a final MP4 using FFmpeg.
+
+    Dynamic-video treatment (subtle, presentation-appropriate — never
+    distracting):
+      * a slow Ken-Burns zoom on every slide so nothing feels static
+      * a short cross-fade in/out at each slide boundary (section transitions)
+      * adaptive hold: the clip lasts at least as long as its narration, plus a
+        complexity-based minimum so dense slides breathe longer than simple ones
+
+    fps and resolution are configurable per render job.
+    """
+
+    fps: int = 30
+    resolution: tuple = (1920, 1080)
 
     def compose(
         self,
@@ -1008,6 +1306,8 @@ class FFmpegComposer:
         slide_wavs: List[Path],
         out_path: Path,
         progress_cb: Optional[Callable[[int, str], None]] = None,
+        durations: Optional[List[float]] = None,
+        motion: bool = True,
     ) -> Path:
         if len(slide_pngs) != len(slide_wavs):
             raise ValueError("PNG/WAV count mismatch")
@@ -1021,7 +1321,11 @@ class FFmpegComposer:
                 if progress_cb:
                     progress_cb(i, f"Encoding slide {i + 1}/{len(slide_pngs)}")
                 clip = tmp_dir / f"slide_{i:03d}.mp4"
-                self._make_clip(png, wav, clip)
+                dur = None
+                if durations and i < len(durations):
+                    dur = durations[i]
+                self._make_clip(png, wav, clip, duration=dur, motion=motion,
+                                direction=i % 4)
                 clip_paths.append(clip)
 
             if progress_cb:
@@ -1032,20 +1336,59 @@ class FFmpegComposer:
 
         return out_path
 
-    def _make_clip(self, png: Path, wav: Path, out: Path) -> None:
+    def _make_clip(self, png: Path, wav: Path, out: Path,
+                   duration: Optional[float] = None, motion: bool = True,
+                   direction: int = 0) -> None:
+        # Resolve hold time: narration length, floored by a readable minimum.
+        try:
+            audio_dur = _get_audio_duration(wav)
+        except Exception:
+            audio_dur = 0.0
+        hold = max(duration or 0.0, audio_dur + 0.6, 3.0)
+        fps = int(self.fps)
+        rw, rh = self.resolution
+        frames = max(int(hold * fps), fps)
+
+        vf_parts: List[str] = []
+        if motion:
+            # Gentle Ken-Burns: zoom 1.00 → ~1.06 with a slow directional drift.
+            # Oversample first so the zoom stays crisp (no shimmer).
+            z_end = 1.06
+            zexpr = f"min(zoom+{(z_end - 1.0) / frames:.6f},{z_end})"
+            # Alternate pan origin for visual variety between slides.
+            pan = [
+                ("iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"),          # center
+                ("0", "0"),                                        # top-left
+                ("iw-(iw/zoom)", "0"),                             # top-right
+                ("iw/2-(iw/zoom/2)", "ih-(ih/zoom)"),             # bottom
+            ][direction % 4]
+            vf_parts.append(
+                f"scale={rw*2}:{rh*2},zoompan=z='{zexpr}':x='{pan[0]}':y='{pan[1]}'"
+                f":d={frames}:s={rw}x{rh}:fps={fps}"
+            )
+        else:
+            vf_parts.append(f"scale={rw}:{rh},fps={fps}")
+        # Cross-friendly fades at the boundaries → smooth section transitions.
+        fade = 0.4
+        vf_parts.append(f"fade=t=in:st=0:d={fade}")
+        vf_parts.append(f"fade=t=out:st={max(hold - fade, 0):.2f}:d={fade}")
+        vf = ",".join(vf_parts)
+
         subprocess.run(
             [
                 "ffmpeg", "-y",
-                "-loop", "1", "-i", str(png),
+                "-loop", "1", "-t", f"{hold:.2f}", "-i", str(png),
                 "-i", str(wav),
-                "-c:v", "libx264", "-tune", "stillimage",
+                "-vf", vf,
+                "-c:v", "libx264", "-preset", "medium",
                 "-c:a", "aac", "-b:a", "192k",
                 "-pix_fmt", "yuv420p",
-                "-shortest",
+                "-t", f"{hold:.2f}",
+                "-af", "apad",             # pad audio to the full hold time
                 "-movflags", "+faststart",
                 str(out),
             ],
-            check=True, capture_output=True, timeout=120,
+            check=True, capture_output=True, timeout=180,
         )
 
     def _concat(self, clips: List[Path], out: Path) -> None:
@@ -1126,6 +1469,59 @@ def avatar_image_for(avatar_id: Optional[str]) -> Path:
     return SADTALKER_DEFAULT_FACE
 
 
+# SadTalker's inference.py imports these at module load; if any is missing the
+# whole "Human Avatar" render fails deep inside a subprocess with no clear
+# signal to the UI. Checking them up front lets us report an accurate,
+# actionable status instead of a silent "unavailable" after a failed render.
+_SADTALKER_PY_DEPS = ["torch", "torchvision", "facexlib", "gfpgan", "kornia",
+                      "face_alignment", "yacs", "pydub", "basicsr"]
+
+_sadtalker_status_cache: dict | None = None
+
+
+def sadtalker_status(force: bool = False) -> dict:
+    """Probe SadTalker availability: install dir, checkpoints, and every
+    Python dependency inference.py needs. Cached after first successful/failed
+    check (import probing is not free) — pass force=True to re-probe, e.g.
+    after the user installs missing packages."""
+    global _sadtalker_status_cache
+    if _sadtalker_status_cache is not None and not force:
+        return _sadtalker_status_cache
+
+    missing_deps: list[str] = []
+    for mod in _SADTALKER_PY_DEPS:
+        try:
+            __import__(mod)
+        except Exception:
+            missing_deps.append(mod)
+
+    dir_ok = SADTALKER_DIR.exists()
+    ckpt_ok = SADTALKER_CKPT.exists() and any(SADTALKER_CKPT.iterdir()) if SADTALKER_CKPT.exists() else False
+    script_ok = (SADTALKER_DIR / "inference.py").exists()
+
+    available = dir_ok and ckpt_ok and script_ok and not missing_deps
+    if available:
+        reason = "SadTalker ready — Human Avatar lip-sync is available."
+    elif not dir_ok:
+        reason = f"SadTalker not installed at {SADTALKER_DIR}."
+    elif not ckpt_ok:
+        reason = "SadTalker checkpoints missing or empty."
+    elif not script_ok:
+        reason = "SadTalker inference.py not found."
+    else:
+        reason = f"Missing Python packages: {', '.join(missing_deps)}. Install with: pip install {' '.join(missing_deps)}"
+
+    _sadtalker_status_cache = {
+        "available": available,
+        "dir_ok": dir_ok,
+        "checkpoints_ok": ckpt_ok,
+        "script_ok": script_ok,
+        "missing_dependencies": missing_deps,
+        "message": reason,
+    }
+    return _sadtalker_status_cache
+
+
 # ── Avatar service — SadTalker real AI lip-sync ───────────────────────────────
 
 class SadTalkerAvatarService:
@@ -1141,6 +1537,40 @@ class SadTalkerAvatarService:
     Runs fully locally — no paid APIs, no internet required after model download.
     """
 
+    # SadTalker renders at roughly this many seconds of wall-clock time per
+    # second of driven audio on typical local hardware (CPU / Apple MPS) —
+    # measured ~16x on an M-series Mac with the (default-off) enhancer
+    # disabled. Kept with headroom above the measured value.
+    SECONDS_PER_AUDIO_SECOND = 20
+    # The (opt-in) gfpgan enhancer adds substantial per-frame overhead on
+    # top of that baseline — scale the timeout up automatically when enabled
+    # rather than making callers remember to raise it themselves.
+    ENHANCER_TIMEOUT_MULTIPLIER = 3
+
+    def __init__(self) -> None:
+        self.last_error: Optional[str] = None
+
+    def _resolve_timeout(self, audio_wav: Path) -> int:
+        """SadTalker's runtime scales with narration length, not a fixed
+        constant — a hardcoded short timeout silently drops the avatar video
+        for any real (multi-slide) presentation. Scale the timeout off the
+        actual audio duration, with an env override for slower/faster boxes."""
+        env_override = os.getenv("SADTALKER_TIMEOUT_SECONDS")
+        if env_override:
+            try:
+                return int(env_override)
+            except ValueError:
+                pass
+        try:
+            duration = _get_audio_duration(audio_wav)
+        except Exception:
+            duration = 60.0
+        multiplier = self.SECONDS_PER_AUDIO_SECOND
+        if os.getenv("SADTALKER_ENHANCER", "").strip():
+            multiplier *= self.ENHANCER_TIMEOUT_MULTIPLIER
+        scaled = int(duration * multiplier)
+        return max(900, scaled)
+
     def generate(
         self,
         audio_wav: Path,
@@ -1148,21 +1578,32 @@ class SadTalkerAvatarService:
         avatar_image: Optional[Path] = None,
     ) -> Optional[Path]:
         """Run SadTalker to generate a lip-synced talking head MP4."""
+        self.last_error = None
+        status = sadtalker_status()
+        if not status["available"]:
+            self.last_error = status["message"]
+            logger.error("[SadTalker] Unavailable: %s", status["message"])
+            return None
+
         if not audio_wav.exists():
+            self.last_error = f"Narration audio not found: {audio_wav}"
             logger.error("[SadTalker] Audio file not found: %s", audio_wav)
             return None
 
         face_img = avatar_image if (avatar_image and avatar_image.exists()) else SADTALKER_DEFAULT_FACE
         if not face_img.exists():
+            self.last_error = f"No avatar face image available at {face_img}"
             logger.error("[SadTalker] No face image available at %s", face_img)
             return None
 
         if not SADTALKER_DIR.exists() or not SADTALKER_CKPT.exists():
+            self.last_error = f"SadTalker not installed at {SADTALKER_DIR}"
             logger.error("[SadTalker] SadTalker not found at %s", SADTALKER_DIR)
             return None
 
         result_dir = out_path.parent / f"sadtalker_tmp_{out_path.stem}"
         result_dir.mkdir(parents=True, exist_ok=True)
+        timeout = self._resolve_timeout(audio_wav)
 
         try:
             env = os.environ.copy()
@@ -1179,24 +1620,36 @@ class SadTalkerAvatarService:
                 "--preprocess", "crop",
                 "--size", "256",
             ]
+            # Face-restoration enhancer: meaningfully improves visual quality
+            # but (a) downloads an extra ~80MB model on first use with no
+            # progress reported mid-request, and (b) adds significant
+            # per-frame overhead on top of SadTalker's own ~16x-realtime
+            # baseline. Opt-in only — off by default so the reliable, faster
+            # path stays the default for demos. Enable with SADTALKER_ENHANCER=gfpgan
+            # once the model has been pre-downloaded and the extra wait is acceptable.
+            enhancer = os.getenv("SADTALKER_ENHANCER", "").strip()
+            if enhancer:
+                cmd += ["--enhancer", enhancer]
 
-            logger.info("[SadTalker] Running: %s", " ".join(cmd))
+            logger.info("[SadTalker] Running (timeout=%ds): %s", timeout, " ".join(cmd))
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=900,
+                timeout=timeout,
                 env=env,
                 cwd=str(SADTALKER_DIR),
             )
 
             if proc.returncode != 0:
+                self.last_error = f"SadTalker exited with code {proc.returncode}: {proc.stderr[-500:]}"
                 logger.error("[SadTalker] Failed (rc=%d):\n%s", proc.returncode, proc.stderr[-2000:])
                 return None
 
             # SadTalker saves to result_dir/<timestamp>/<name>.mp4
             mp4_files = list(result_dir.rglob("*.mp4"))
             if not mp4_files:
+                self.last_error = "SadTalker produced no output video"
                 logger.error("[SadTalker] No MP4 produced in %s", result_dir)
                 return None
 
@@ -1210,10 +1663,17 @@ class SadTalkerAvatarService:
             return out_path
 
         except subprocess.TimeoutExpired:
-            logger.error("[SadTalker] Timed out after 900s")
+            self.last_error = (
+                f"SadTalker avatar rendering timed out after {timeout}s. The narration for this "
+                "presentation is long enough that AI lip-sync couldn't finish in time on this "
+                "machine — set SADTALKER_TIMEOUT_SECONDS to a higher value to allow more time, "
+                "or shorten the narration."
+            )
+            logger.error("[SadTalker] Timed out after %ds", timeout)
             shutil.rmtree(result_dir, ignore_errors=True)
             return None
         except Exception as exc:
+            self.last_error = f"SadTalker failed: {exc}"
             logger.error("[SadTalker] Exception: %s", exc, exc_info=True)
             shutil.rmtree(result_dir, ignore_errors=True)
             return None
@@ -1221,6 +1681,162 @@ class SadTalkerAvatarService:
 
 # Keep old name as alias for backward compat
 LocalAvatarService = SadTalkerAvatarService
+
+
+def _draw_captions(img, text: str, theme_id: str, left: int = 140, right: int = 140):
+    """Burn a clean caption band with the narration onto a slide frame. `left`
+    and `right` are the band's horizontal margins — insetting on the presenter's
+    side keeps captions clear of the presenter figure."""
+    from PIL import Image, ImageDraw
+    theme = THEMES.get(theme_id, THEMES["ey"])
+    words = " ".join(str(text).split())
+    band_w_chars = max(int((SLIDE_W - left - right) / 21), 30)
+    if len(words) > band_w_chars * 2:
+        words = words[: band_w_chars * 2 - 3].rsplit(" ", 1)[0] + "…"
+    font = _load_font(30)
+    lines, cur = [], ""
+    for w in words.split(" "):
+        if len(cur) + len(w) + 1 > band_w_chars:
+            lines.append(cur); cur = w
+        else:
+            cur = (cur + " " + w).strip()
+    if cur:
+        lines.append(cur)
+    lines = lines[:2]
+    band_h = 40 + len(lines) * 42
+    base = img.convert("RGBA")
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(overlay)
+    y0 = SLIDE_H - 60 - band_h - 20
+    d.rectangle([(left, y0), (SLIDE_W - right, y0 + band_h)], fill=(46, 46, 56, 215))
+    d.rectangle([(left, y0), (left + 6, y0 + band_h)], fill=(*theme["accent"], 255))
+    for i, ln in enumerate(lines):
+        d.text((left + 32, y0 + 20 + i * 42), ln, font=font, fill=(255, 255, 255, 255))
+    base.alpha_composite(overlay)
+    return base.convert("RGB")
+
+
+# ── Cartoon presenter — professional corporate explainer (default) ────────────
+
+class CartoonPresenterService:
+    """Draws a clean, professional cartoon presenter (not childish) and
+    composites it onto a slide frame. The presenter stands to the side so it
+    never covers content, and can gesture toward the slide ("point") or face
+    the audience ("talk"). Rendered fully locally with Pillow — no assets, no
+    downloads. A talking-head lip-sync avatar remains available via the
+    "human" presenter (SadTalker); this is the lightweight default."""
+
+    def composite(self, slide_img, theme_id: str, gesture: str = "talk",
+                  hero: bool = False, position: str = "right"):
+        from PIL import Image, ImageOps
+        theme = THEMES.get(theme_id, THEMES["ey"])
+        h = SLIDE_H
+        # Hero slides (title/section/closing) have right-side whitespace → a
+        # larger figure on the right. Content slides (and anything on the LEFT,
+        # where titles are left-aligned) get a compact corner presenter that
+        # tucks into the margin so it never covers the content.
+        left_side = str(position).lower() == "left"
+        frac = 0.52 if (hero and not left_side) else 0.34
+        pw = int(h * frac)
+        ph = int(pw * 1.65)
+        gest = gesture
+        presenter = self._draw_presenter(pw, ph, theme, gest)
+        if str(position).lower() == "left":
+            presenter = ImageOps.mirror(presenter)  # face/point toward content
+            x = 60 if hero else 18
+        else:
+            x = SLIDE_W - pw - (60 if hero else 18)
+        y = SLIDE_H - ph - (60 if hero else 40)
+        base = slide_img.convert("RGBA")
+        base.alpha_composite(presenter, (x, y))
+        return base.convert("RGB")
+
+    def _draw_presenter(self, w: int, h: int, theme: dict, gesture: str):
+        from PIL import Image, ImageDraw
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+
+        accent = tuple(theme["accent"])
+        charcoal = (46, 46, 56)
+        suit = (52, 58, 74)          # navy-charcoal business suit
+        suit_dark = (38, 42, 55)
+        shirt = (245, 246, 250)
+        skin = (233, 196, 166)
+        skin_sh = (214, 176, 146)
+        hair = (58, 46, 40)
+
+        cx = w // 2
+        # Soft ground shadow for grounding
+        d.ellipse([cx - w * 0.32, h - h * 0.05, cx + w * 0.32, h], fill=(0, 0, 0, 40))
+
+        # ── Torso / suit jacket (rounded shoulders) ──────────────────────────
+        sh_top = int(h * 0.42)
+        d.rounded_rectangle([cx - w * 0.34, sh_top, cx + w * 0.34, h - 2],
+                            radius=int(w * 0.22), fill=suit)
+        # Lapels + shirt V
+        d.polygon([(cx - w * 0.10, sh_top + 6), (cx + w * 0.10, sh_top + 6),
+                   (cx, sh_top + h * 0.20)], fill=shirt)
+        d.polygon([(cx - w * 0.10, sh_top + 6), (cx, sh_top + h * 0.20),
+                   (cx - w * 0.02, sh_top + h * 0.10)], fill=suit_dark)
+        d.polygon([(cx + w * 0.10, sh_top + 6), (cx, sh_top + h * 0.20),
+                   (cx + w * 0.02, sh_top + h * 0.10)], fill=suit_dark)
+        # Tie in EY yellow — the signature pop of colour
+        d.polygon([(cx - w * 0.03, sh_top + h * 0.06), (cx + w * 0.03, sh_top + h * 0.06),
+                   (cx + w * 0.05, sh_top + h * 0.24), (cx, sh_top + h * 0.30),
+                   (cx - w * 0.05, sh_top + h * 0.24)], fill=accent)
+
+        # ── Neck + head ──────────────────────────────────────────────────────
+        neck_w = w * 0.11
+        d.rectangle([cx - neck_w, sh_top - h * 0.06, cx + neck_w, sh_top + 8], fill=skin_sh)
+        head_r = w * 0.20
+        head_cy = int(h * 0.24)
+        d.ellipse([cx - head_r, head_cy - head_r * 1.15, cx + head_r, head_cy + head_r * 1.1],
+                  fill=skin)
+        # Ears
+        d.ellipse([cx - head_r - 6, head_cy - 6, cx - head_r + 10, head_cy + 18], fill=skin)
+        d.ellipse([cx + head_r - 10, head_cy - 6, cx + head_r + 6, head_cy + 18], fill=skin)
+        # Hair — neat professional cut
+        d.chord([cx - head_r - 2, head_cy - head_r * 1.25, cx + head_r + 2, head_cy + head_r * 0.3],
+                180, 360, fill=hair)
+        d.rectangle([cx - head_r - 2, head_cy - head_r * 0.55, cx - head_r + 8, head_cy + head_r * 0.2],
+                    fill=hair)
+        d.rectangle([cx + head_r - 8, head_cy - head_r * 0.55, cx + head_r + 2, head_cy + head_r * 0.2],
+                    fill=hair)
+        # Eyes (maintaining eye contact — looking at the audience)
+        eye_y = head_cy
+        for ex in (cx - head_r * 0.42, cx + head_r * 0.42):
+            d.ellipse([ex - 9, eye_y - 7, ex + 9, eye_y + 7], fill=(255, 255, 255))
+            d.ellipse([ex - 4, eye_y - 4, ex + 4, eye_y + 4], fill=charcoal)
+        # Eyebrows
+        d.line([cx - head_r * 0.58, eye_y - 16, cx - head_r * 0.24, eye_y - 19], fill=hair, width=4)
+        d.line([cx + head_r * 0.24, eye_y - 19, cx + head_r * 0.58, eye_y - 16], fill=hair, width=4)
+        # Friendly confident smile
+        d.arc([cx - head_r * 0.4, eye_y + 6, cx + head_r * 0.4, eye_y + head_r * 0.55],
+              15, 165, fill=(150, 90, 80), width=4)
+
+        # ── Arms / gesture ───────────────────────────────────────────────────
+        arm_w = int(w * 0.13)
+        if gesture == "point":
+            # Raised arm pointing up-left toward the slide content
+            d.line([(cx - w * 0.28, sh_top + h * 0.06), (cx - w * 0.46, sh_top - h * 0.02)],
+                   fill=suit, width=arm_w)
+            # Hand + pointing finger
+            hx, hy = cx - w * 0.47, sh_top - h * 0.03
+            d.ellipse([hx - 12, hy - 12, hx + 12, hy + 12], fill=skin)
+            d.line([(hx, hy), (hx - 22, hy - 14)], fill=skin, width=8)
+        else:
+            # Open-hand welcoming gesture at waist height
+            d.line([(cx - w * 0.28, sh_top + h * 0.08), (cx - w * 0.36, sh_top + h * 0.30)],
+                   fill=suit, width=arm_w)
+            hx, hy = cx - w * 0.36, sh_top + h * 0.32
+            d.ellipse([hx - 13, hy - 13, hx + 13, hy + 13], fill=skin)
+        # Resting right arm
+        d.line([(cx + w * 0.28, sh_top + h * 0.08), (cx + w * 0.30, sh_top + h * 0.34)],
+               fill=suit, width=arm_w)
+        hx2, hy2 = cx + w * 0.30, sh_top + h * 0.35
+        d.ellipse([hx2 - 12, hy2 - 12, hx2 + 12, hy2 + 12], fill=skin)
+
+        return img
 
 
 # ── Job registry ─────────────────────────────────────────────────────────────
@@ -1243,6 +1859,22 @@ class VideoRenderJob:
     voice_id: str
     slides: List[Dict[str, Any]]
     avatar_id: str = "professional_male"
+    # Presenter system: cartoon (default) | human | voice_only | none
+    presenter_type: str = "cartoon"
+    presenter_position: str = "right"     # right | left
+    # Human-like voice controls (see VoiceControls)
+    voice_speed: float = 1.0
+    voice_pitch: float = 1.0
+    voice_volume: float = 1.0
+    voice_emotion: str = "confident"
+    narration_style: str = "consultant"
+    pause_scale: float = 1.0
+    emphasis: float = 1.0
+    # Video controls
+    resolution: str = "1080p"             # 720p | 1080p | 1440p
+    fps: int = 30
+    captions: bool = False
+    motion: bool = True                    # Ken-Burns / camera motion toggle
     status: str = "queued"  # queued | running | completed | failed
     percent: int = 0
     stage: str = "Queued"
@@ -1258,6 +1890,7 @@ class VideoRenderJob:
     started_at: float = field(default_factory=time.time)
     eta_seconds: Optional[float] = None
     fallback_used: bool = False
+    avatar_error: Optional[str] = None
 
 
 # Module-level job registry (in-memory, survives request lifecycle)
@@ -1269,11 +1902,29 @@ def create_job(
     project_id: int,
     slides: List[Dict[str, Any]],
     mode: str = "slides",
-    theme_id: str = "ey_dark",
+    theme_id: str = "ey",
     voice_id: str = "samantha",
     avatar_id: str = "professional_male",
+    presenter_type: str = "cartoon",
+    presenter_position: str = "right",
+    voice_speed: float = 1.0,
+    voice_pitch: float = 1.0,
+    voice_volume: float = 1.0,
+    voice_emotion: str = "confident",
+    narration_style: str = "consultant",
+    pause_scale: float = 1.0,
+    emphasis: float = 1.0,
+    resolution: str = "1080p",
+    fps: int = 30,
+    captions: bool = False,
+    motion: bool = True,
 ) -> VideoRenderJob:
     job_id = uuid.uuid4().hex
+    # A "human" presenter drives SadTalker lip-sync; everything else renders the
+    # narrated (optionally cartoon-overlaid) slideshow. `mode` is kept in sync
+    # for backward compatibility with existing callers/routes.
+    if presenter_type == "human":
+        mode = "avatar"
     storyboard = [
         StoryboardFrame(slide_idx=i, title=s.get("title", f"Slide {i + 1}"))
         for i, s in enumerate(slides)
@@ -1286,6 +1937,19 @@ def create_job(
         voice_id=voice_id,
         slides=slides,
         avatar_id=avatar_id,
+        presenter_type=presenter_type,
+        presenter_position=presenter_position,
+        voice_speed=voice_speed,
+        voice_pitch=voice_pitch,
+        voice_volume=voice_volume,
+        voice_emotion=voice_emotion,
+        narration_style=narration_style,
+        pause_scale=pause_scale,
+        emphasis=emphasis,
+        resolution=resolution,
+        fps=fps,
+        captions=captions,
+        motion=motion,
         storyboard=storyboard,
     )
     with _jobs_lock:
@@ -1336,12 +2000,55 @@ def _run_pipeline_inner(job, db_session_factory, save_artifact_fn):
     job.stage = "Rendering slides"
     _log(job, f"Rendering {total} slides with theme '{job.theme_id}'")
 
+    # Cartoon presenter is composited beside content so it never covers it.
+    presenter_svc = CartoonPresenterService() if job.presenter_type == "cartoon" else None
+
+    # High-fidelity path: rasterise the real EY .pptx so the video matches the
+    # downloadable deck exactly and supports every layout. Falls back to the
+    # lightweight Pillow renderer if LibreOffice/poppler aren't available.
+    hi_frames = None
+    try:
+        project_name = (slides[0].get("title") if slides else None) or f"Project {job.project_id}"
+        hi_frames = PptxFrameRenderer().render_all(
+            slides, job.theme_id, project_name, tmp_dir / "pptx_frames"
+        )
+        if hi_frames:
+            _log(job, f"Using high-fidelity PPTX frames ({len(hi_frames)} rendered)")
+    except Exception as exc:
+        _log(job, f"PPTX frame render unavailable ({exc}); using Pillow renderer")
+        hi_frames = None
+
     for i, slide in enumerate(slides):
         pct = int(5 + (i / total) * 35)
         _progress(job, pct, f"Rendering slide {i + 1}/{total}: {slide.get('title', '')[:40]}")
         job.storyboard[i].status = "rendering"
 
-        img = renderer.render(slide, job.theme_id, i + 1, total)
+        if hi_frames and i < len(hi_frames):
+            img = hi_frames[i]
+        else:
+            img = renderer.render(slide, job.theme_id, i + 1, total)
+        if presenter_svc is not None:
+            # First and last slide get a larger, front-and-centre presenter;
+            # content slides get a smaller presenter standing to the side.
+            layout = slide.get("layout")
+            gesture = "point" if layout in ("architecture", "process", "chart", "timeline", "table", "tech_grid", "roadmap", "comparison") else "talk"
+            # Large "hero" presenter only on spacious layouts; dense content
+            # slides always get the compact corner presenter so it never covers content.
+            hero = layout in ("title", "section", "closing", "quote")
+            img = presenter_svc.composite(img, job.theme_id, gesture=gesture, hero=hero,
+                                          position=job.presenter_position)
+        # Optional burned-in captions — inset on the presenter's side so the
+        # caption band never sits under the presenter figure.
+        if job.captions:
+            cap = (slide.get("narration") or slide.get("speaker_notes") or "").strip()
+            if cap:
+                cl, cr = 140, 140
+                if presenter_svc is not None:
+                    if str(job.presenter_position).lower() == "left":
+                        cl = 560
+                    else:
+                        cr = 560
+                img = _draw_captions(img, cap, job.theme_id, left=cl, right=cr)
         png_path = tmp_dir / f"slide_{i:03d}.png"
         renderer.to_png(img, png_path)
         slide_pngs.append(png_path)
@@ -1352,32 +2059,48 @@ def _run_pipeline_inner(job, db_session_factory, save_artifact_fn):
 
     # ── Phase 2: Generate narration audio ─────────────────────────────────
     job.stage = "Generating narration"
-    _log(job, f"Synthesizing audio with voice '{job.voice_id}'")
+    _log(job, f"Synthesizing audio · voice '{job.voice_id}' · emotion '{job.voice_emotion}'")
+
+    controls = VoiceControls(
+        voice_id=job.voice_id,
+        speed=job.voice_speed,
+        pitch=job.voice_pitch,
+        volume=job.voice_volume,
+        emotion=job.voice_emotion,
+        narration_style=job.narration_style,
+        pause_scale=job.pause_scale,
+        emphasis=job.emphasis,
+    )
+    slide_durations: List[float] = []
 
     for i, slide in enumerate(slides):
         pct = int(40 + (i / total) * 30)
         _progress(job, pct, f"TTS: slide {i + 1}/{total}")
 
         narration = (
-            slide.get("speaker_notes")
-            or slide.get("narration")
+            slide.get("narration")
+            or slide.get("speaker_notes")
             or slide.get("content")
             or slide.get("title", "")
         )
         narration = (narration or "").strip()
-        if len(narration) > 500:
-            narration = narration[:500]
+        if len(narration) > 900:
+            narration = narration[:900]
 
         wav_path = tmp_dir / f"audio_{i:03d}.wav"
-        tts.synthesize(narration, wav_path, voice_id=job.voice_id)
+        tts.synthesize(narration, wav_path, controls=controls)
 
         try:
             dur = _get_audio_duration(wav_path)
         except Exception:
             dur = 0.0
         job.storyboard[i].audio_duration = dur
+        # Adaptive timing: complex slides hold longer than simple ones, even if
+        # the narration is short, so viewers can absorb dense visuals.
+        hold = max(dur + 0.6, _slide_min_duration(slide))
+        slide_durations.append(hold)
         slide_wavs.append(wav_path)
-        _log(job, f"  ✓ Audio {i + 1}: {dur:.1f}s")
+        _log(job, f"  ✓ Audio {i + 1}: {dur:.1f}s → hold {hold:.1f}s")
 
     # ── Phase 3: Compose MP4 ──────────────────────────────────────────────
     job.stage = "Composing video"
@@ -1391,7 +2114,11 @@ def _run_pipeline_inner(job, db_session_factory, save_artifact_fn):
         _progress(job, pct, msg)
         _log(job, f"  {msg}")
 
-    composer.compose(slide_pngs, slide_wavs, out_mp4, progress_cb=encode_cb)
+    _RES = {"720p": (1280, 720), "1080p": (1920, 1080), "1440p": (2560, 1440)}
+    composer.fps = int(job.fps or 30)
+    composer.resolution = _RES.get(job.resolution, (1920, 1080))
+    composer.compose(slide_pngs, slide_wavs, out_mp4, progress_cb=encode_cb,
+                     durations=slide_durations, motion=job.motion)
     job.video_path = str(out_mp4)
     job.duration_seconds = _get_video_duration(out_mp4)
     _log(job, f"Video composed: {job.duration_seconds:.1f}s → {out_mp4.name}")
@@ -1420,7 +2147,8 @@ def _run_pipeline_inner(job, db_session_factory, save_artifact_fn):
             _log(job, f"✓ SadTalker avatar generated: {result.name}")
         else:
             job.fallback_used = True
-            _log(job, "⚠ SadTalker failed — avatar_path will be None")
+            job.avatar_error = avatar_svc.last_error or "SadTalker failed for an unknown reason"
+            _log(job, f"⚠ SadTalker failed — avatar_path will be None ({job.avatar_error})")
 
     # ── Phase 5: Persist artifacts ────────────────────────────────────────
     job.stage = "Saving artifacts"
@@ -1462,6 +2190,28 @@ def _progress(job: VideoRenderJob, percent: int, message: str = "") -> None:
     elapsed = time.time() - job.started_at
     if percent > 5:
         job.eta_seconds = elapsed / (percent / 100) * (1 - percent / 100)
+
+
+# Complexity-weighted minimum hold times (seconds). Dense, information-rich
+# layouts stay on screen longer so the audience can read and absorb them.
+_LAYOUT_MIN_DURATION: Dict[str, float] = {
+    "title": 4.0, "section": 3.5, "divider": 3.5, "quote": 5.0, "closing": 5.0,
+    "agenda": 6.0, "items": 7.0, "content": 6.0, "two_col": 8.0, "two_column": 8.0,
+    "comparison": 8.0, "kpi_cards": 6.0, "stats_grid": 7.0, "chart": 8.0,
+    "table": 9.0, "tech_grid": 8.0, "process": 8.5, "architecture": 10.0,
+    "roadmap": 8.0, "timeline": 7.5,
+}
+
+
+def _slide_min_duration(slide: Dict[str, Any]) -> float:
+    base = _LAYOUT_MIN_DURATION.get(str(slide.get("layout", "content")), 6.0)
+    # Extra dwell for slides carrying a lot of discrete elements.
+    n_items = (len(slide.get("items", []) or [])
+               + len(slide.get("steps", []) or [])
+               + len(slide.get("layers", []) or [])
+               + len((slide.get("table", {}) or {}).get("rows", []))
+               + len((slide.get("chart", {}) or {}).get("data", [])))
+    return base + min(n_items * 0.35, 4.0)
 
 
 def _get_audio_duration(wav_path: Path) -> float:

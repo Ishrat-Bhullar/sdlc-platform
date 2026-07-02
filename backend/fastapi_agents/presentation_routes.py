@@ -23,6 +23,8 @@ frontend's `mediaStudioService.ts` / `diagramService.ts` call.
 from __future__ import annotations
 
 import json
+import os
+import re
 import logging
 import asyncio
 from datetime import datetime, timezone
@@ -31,7 +33,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File, Form
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
 
 from .presentation_schemas import (
@@ -58,6 +60,292 @@ logger = logging.getLogger(__name__)
 # Kept for backwards-compat with any external import of `router`; the actual
 # routes used by the app are registered onto `app_router` inside `_register`.
 router = APIRouter(tags=["presentation"])
+
+
+# ---------------------------------------------------------------------------
+# PDF -> Presentation understanding pipeline (used by /video/render/from-pdf)
+# ---------------------------------------------------------------------------
+
+def _extract_pdf_text(pdf_path: str) -> tuple[str, int]:
+    """Extract full document text (all pages, joined) + page count. Tries
+    pdfplumber first, falls back to PyPDF2 — mirrors the platform's existing
+    ingestion path so behaviour is consistent."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(pdf_path) as pdf:
+            pages = [(p.extract_text() or "").strip() for p in pdf.pages]
+            return "\n\n".join(pages), len(pdf.pages)
+    except ImportError:
+        pass
+    import PyPDF2
+    reader = PyPDF2.PdfReader(pdf_path)
+    pages = [(p.extract_text() or "").strip() for p in reader.pages]
+    return "\n\n".join(pages), len(reader.pages)
+
+
+_DIAGRAM_KEYWORDS = ("architecture", "workflow", "pipeline", "data flow", "process flow",
+                    "sequence", "deployment", "system design", "component diagram")
+
+
+def _understand_document_to_slides(full_text: str, project_name: str, page_count: int) -> list[dict]:
+    """Turn a full document into a consulting-quality, narrated slide deck.
+
+    Single bounded LLM call (small/fast 'planning' model, hard timeout) asks
+    for a structured outline with real narration in one shot — deliberately
+    ONE call, not one-per-slide, to stay inside the timeout budget while
+    still producing detailed speaker notes per slide. On any failure
+    (timeout, unreachable Ollama, bad JSON) falls back to a deterministic,
+    section-based builder that runs instantly and never blocks the request.
+    Diagrams are then auto-attached to any slide whose content describes an
+    architecture/workflow/process, via the native renderer (always succeeds).
+    """
+    # The LLM path truncates its input to stay inside a small model's context
+    # budget (see _llm_document_to_slides), which silently drops entire
+    # sections from the middle of any document longer than that budget. The
+    # deterministic path processes the WHOLE document regardless of length,
+    # so for long documents (e.g. a 20-page consulting proposal) it's the
+    # more complete result — skip the LLM call entirely rather than feed it
+    # a truncated document and get a worse, incomplete summary.
+    slides = None
+    if len(full_text.strip()) <= 12000:
+        slides = _llm_document_to_slides(full_text, project_name)
+    if not slides:
+        logger.info(
+            "[PDFPipeline] Using deterministic section builder (%s)",
+            "document too large for a single LLM call" if len(full_text.strip()) > 12000
+            else "LLM understanding unavailable/failed",
+        )
+        slides = _deterministic_document_to_slides(full_text, project_name, page_count)
+
+    return [_attach_diagram_if_relevant(s) for s in slides]
+
+
+def _llm_document_to_slides(full_text: str, project_name: str) -> list[dict] | None:
+    from .agents.llm_client import OllamaClient, LLMConnectionError
+    import json as _json
+
+    system = (
+        "You are a management consultant who turns source documents into client-ready "
+        "presentation decks. You read the ENTIRE document, understand the business problem, "
+        "solution, architecture and value, and produce a structured deck. "
+        "NEVER write filler like 'this slide shows' in narration — speak like a consultant "
+        "explaining ideas aloud, with smooth transitions. Ground every fact in the document; "
+        "do not invent numbers.\n\n"
+        "Return ONLY valid JSON: a list of 8-12 slide objects, each with:\n"
+        '  "title": short slide title,\n'
+        '  "layout": one of [title, items, kpi_cards, table, two_col, comparison, '
+        'tech_grid, process, architecture, roadmap, timeline, quote, closing, content],\n'
+        '  "bullets": array of short on-slide phrases (3-6 words each, 3-6 bullets),\n'
+        '  "speaker_notes": 70-140 words of natural spoken narration explaining the idea '
+        "(not reading the bullets aloud) — cover problem, solution, architecture, workflow, "
+        "technology, benefits, ROI and conclusion across the deck as a whole.\n"
+        "No markdown fences, no preamble — JSON array only."
+    )
+    # Cap input so the call stays fast on small local models; the opening and
+    # closing of a document usually carry the executive summary / conclusion.
+    doc = full_text.strip()
+    if len(doc) > 9000:
+        doc = doc[:6000] + "\n\n...[middle omitted]...\n\n" + doc[-2500:]
+    user_prompt = f"Document title/context: {project_name}\n\nDOCUMENT TEXT:\n{doc}"
+
+    try:
+        client = OllamaClient(role="planning", timeout=55)
+        raw = client.generate(system=system, prompt=user_prompt, temperature=0.3)
+        try:
+            data = _json.loads(raw)
+        except _json.JSONDecodeError:
+            data = _repair_truncated_json_array(raw)
+            if data is None:
+                raise
+        items = data if isinstance(data, list) else data.get("slides", [])
+        slides = []
+        for i, it in enumerate(items):
+            if not isinstance(it, dict) or not it.get("title"):
+                continue
+            bullets = it.get("bullets") or []
+            slides.append({
+                "title": str(it["title"])[:90],
+                "subtitle": "",
+                "layout": str(it.get("layout") or ("title" if i == 0 else "items")).strip().lower(),
+                "content": "\n".join(f"• {b}" for b in bullets) if bullets else "",
+                "items": [{"icon": "check", "title": b, "body": ""} for b in bullets] if bullets else [],
+                "speaker_notes": str(it.get("speaker_notes", ""))[:900],
+                "duration": 30,
+            })
+        return slides or None
+    except (LLMConnectionError, ValueError, _json.JSONDecodeError, Exception) as exc:
+        logger.info("[PDFPipeline] LLM document understanding failed (%s) — falling back", exc)
+        return None
+
+
+def _repair_truncated_json_array(raw: str) -> list | None:
+    """Small local models occasionally stop generating mid-object (hit their
+    natural stopping point, or degenerate into trailing whitespace) before
+    closing a JSON array. Rather than discard the whole response, salvage
+    every complete top-level object that parses cleanly, so a model that got
+    6 of 10 slides right before truncating still contributes 6 real, richly
+    narrated slides instead of triggering the generic fallback."""
+    import json as _json
+    start = raw.find("[")
+    if start == -1:
+        return None
+    depth, in_str, esc = 0, False, False
+    obj_start = None
+    objects: list[dict] = []
+    for i, ch in enumerate(raw[start:], start=start):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                try:
+                    objects.append(_json.loads(raw[obj_start:i + 1]))
+                except _json.JSONDecodeError:
+                    pass
+                obj_start = None
+    return objects or None
+
+
+_HEADING_HINTS = (
+    "executive summary", "business problem", "problem statement", "challenge",
+    "proposed solution", "solution overview", "why this solution", "architecture",
+    "technology stack", "tech stack", "implementation", "workflow", "process",
+    "deliverable", "demonstration", "benefit", "roi", "return on investment",
+    "future scope", "conclusion", "next steps", "recommendation", "overview",
+    "background", "objective", "scope", "approach", "methodology",
+)
+
+
+def _looks_like_heading(line: str) -> bool:
+    """A line is treated as a section heading if it's short and either reads
+    like a title (Title Case / ALL CAPS / ends with ':') or matches a common
+    business-document section name — checked line-by-line across the WHOLE
+    document, not just at paragraph boundaries, since many real PDFs
+    (plain-text exports, Word conversions) don't preserve blank-line breaks
+    between sections."""
+    l = line.strip()
+    if not (3 < len(l) < 70):
+        return False
+    # PDF page-footer/header noise ("Page | 2", "Page 12 of 20") — never a
+    # real section heading, but ends up Title-Case and short like one.
+    if re.match(r"^page\s*(\|\s*)?\d+(\s+of\s+\d+)?$", l, re.IGNORECASE):
+        return False
+    if l.rstrip(":").lower() in _HEADING_HINTS:
+        return True
+    words = l.split()
+    if not words:
+        return False
+    # Title Case / ALL CAPS heading, not a full sentence (no terminal period).
+    return (not l.endswith(".")) and (l.isupper() or l.istitle() or l.endswith(":"))
+
+
+def _sentences_as_bullets(text: str, max_bullets: int = 5, max_len: int = 130) -> list[str]:
+    """Split a section's joined text into complete sentences for on-slide
+    bullets — PDF text extraction wraps mid-sentence at the page's line
+    width, so using raw lines as bullets (the previous approach) produced
+    broken, mid-sentence fragments. Splitting on sentence boundaries instead
+    gives clean, readable phrases."""
+    text = " ".join(text.split())
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z(])", text)
+    bullets = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if len(s) > max_len:
+            s = s[:max_len].rsplit(" ", 1)[0] + "…"
+        bullets.append(s)
+        if len(bullets) >= max_bullets:
+            break
+    return bullets or ([text[:max_len]] if text else ["See full narration below."])
+
+
+def _deterministic_document_to_slides(full_text: str, project_name: str, page_count: int) -> list[dict]:
+    """Instant, dependency-free document -> deck builder. Scans every line
+    (independent of paragraph/blank-line structure, which many real-world
+    PDFs don't preserve) for section headings, so even without any LLM
+    available the user gets a complete, navigable, multi-slide deck — never
+    a single wall-of-text slide."""
+    all_lines = [l.strip() for l in full_text.splitlines() if l.strip()]
+    sections: list[tuple[str, list[str]]] = []
+    current_title, current_lines = project_name, []
+    for line in all_lines:
+        if _looks_like_heading(line) and current_lines:
+            sections.append((current_title, current_lines))
+            current_title, current_lines = line.rstrip(":"), []
+        else:
+            current_lines.append(line)
+    if current_lines:
+        sections.append((current_title, current_lines))
+    # First "section" is often just the document title line repeated as both
+    # the title and sole content — drop it if it duplicates project_name.
+    if sections and sections[0][0] == project_name and len(sections) > 1:
+        lead_text = " ".join(sections[0][1]).strip()
+        if len(lead_text) < 20:
+            sections = sections[1:]
+    if not sections:
+        sections = [(project_name, [full_text[:800]])]
+
+    if len(sections) > 18:
+        logger.info("[PDFPipeline] Document has %d sections — keeping first 18", len(sections))
+    sections = sections[:18]
+    slides = [{
+        "title": project_name, "subtitle": f"{page_count}-page document — automated summary",
+        "layout": "title", "content": "", "items": [],
+        "speaker_notes": f"Good morning. What follows is a structured walkthrough of {project_name}, "
+                        f"covering the problem, the proposed approach, and the value it delivers.",
+        "duration": 30,
+    }]
+    for title, lines in sections:
+        bullets = _sentences_as_bullets(" ".join(lines))
+        narration = " ".join(lines)[:600] or f"This section covers {title}."
+        slides.append({
+            "title": title[:90], "subtitle": "", "layout": "items",
+            "content": "\n".join(f"• {b}" for b in bullets),
+            "items": [{"icon": "check", "title": b, "body": ""} for b in bullets],
+            "speaker_notes": narration, "duration": 28,
+        })
+    slides.append({
+        "title": "Conclusion", "subtitle": "", "layout": "closing",
+        "content": "", "items": [{"icon": "check", "title": "Thank you", "body": ""}],
+        "speaker_notes": "That concludes this walkthrough. Happy to take any questions.",
+        "duration": 20,
+    })
+    return slides
+
+
+def _attach_diagram_if_relevant(slide: dict) -> dict:
+    """If a slide's title/content strongly suggests a diagram would clarify
+    it, render one with the native (always-available) renderer and attach
+    its path — never blocks, never fails the slide if rendering errors."""
+    text = f"{slide.get('title','')} {slide.get('content','')}".lower()
+    if slide.get("layout") in ("architecture", "process") or any(k in text for k in _DIAGRAM_KEYWORDS):
+        try:
+            from .native_diagram_renderer import spec_from_text, render as native_render
+            from .diagram_service import default_storage_base
+            dtype = "architecture" if "architecture" in text or "deployment" in text else (
+                "sequence" if "sequence" in text else "process")
+            bullets_text = slide.get("content", "").replace("• ", "\n").strip() or slide.get("title", "")
+            spec = spec_from_text(bullets_text, dtype)
+            out_dir = default_storage_base() / "diagrams" / "pdf_auto"
+            base = f"auto_{abs(hash(slide.get('title','')))}"
+            svg_path, png_path = native_render(spec, out_dir, base)
+            slide["diagram_image"] = str(png_path)
+        except Exception as exc:
+            logger.debug("[PDFPipeline] auto-diagram skipped for slide %r: %s", slide.get("title"), exc)
+    return slide
 
 
 def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_manager):
@@ -570,54 +858,110 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
 
     async def generate_diagram_inline(payload: DiagramGenerateRequest, db: Session) -> DiagramGenerateResponse:
         """Shared implementation used by both the direct endpoint and the
-        'Diagram' toolbar action."""
-        try:
-            from .diagram_service import (
-                build_diagram_artifact_for_mermaid,
-                write_artifact_files,
-                default_storage_base,
-            )
+        'Diagram' toolbar action.
 
-            # Minimal mermaid source derived from the prompt/type — keeps this
-            # endpoint functional end-to-end without requiring a separate LLM
-            # round trip just to produce diagram syntax.
-            diagram_type = payload.type or "Flowchart"
-            safe_prompt = (payload.prompt or "Diagram").strip().replace('"', "'")
-            mermaid_source = f'flowchart TD\n    A["{safe_prompt[:60]}"] --> B["Generated Diagram"]\n'
+        Render fallback chain (never leaves the user with a failed diagram):
+          1. mermaid-cli (mmdc)   — if installed, prettiest mermaid rendering
+          2. Native renderer      — pure Python + Pillow, zero external
+                                     binaries, always succeeds. This is the
+                                     guaranteed path on machines without
+                                     mmdc/PlantUML/graphviz installed.
+        Retries once on transient failure before falling back.
+        """
+        from .diagram_service import default_storage_base, write_artifact_files, DiagramArtifact
+        from .native_diagram_renderer import spec_from_text, render as native_render
 
-            artifact = build_diagram_artifact_for_mermaid(
-                diagram_type=diagram_type,
-                mermaid_source=mermaid_source,
-                out_dir=default_storage_base() / "diagrams" / "tmp",
-                base_name=f"diagram_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-            )
+        diagram_type = (payload.type or "Flowchart").strip()
+        dtype_key = diagram_type.lower().replace(" ", "_").replace("diagram", "").strip("_") or "workflow"
+        safe_prompt = (payload.prompt or "Diagram").strip()
+        base_name = f"diagram_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        out_dir = default_storage_base() / "diagrams" / "tmp"
 
-            meta = write_artifact_files(
-                default_storage_base(),
-                payload.project_id or 0,
-                None,
-                [artifact],
-            )
-            file_meta = meta["files"][0] if meta.get("files") else {}
+        spec = spec_from_text(safe_prompt, dtype_key)
+        mermaid_source = _spec_to_mermaid(spec)
 
-            return DiagramGenerateResponse(
-                diagram_type=diagram_type,
-                source_format="mermaid",
-                source=mermaid_source,
-                svg_url=file_meta.get("svg_path"),
-                png_url=file_meta.get("png_path"),
-                status="generated",
-            )
-        except Exception as exc:
-            logger.warning("[DiagramGenerate] Rendering failed, returning source only: %s", exc)
-            return DiagramGenerateResponse(
-                diagram_type=payload.type,
-                source_format="mermaid",
-                source=f"flowchart TD\n    A[\"{(payload.prompt or 'Diagram')[:60]}\"] --> B[\"Generated\"]\n",
-                svg_url=None,
-                png_url=None,
-                status="generated_unrendered",
-            )
+        svg_path = png_path = None
+        source_format = "mermaid"
+        status = "generated"
+
+        # 1) Try mermaid-cli, with one retry, if it's actually installed.
+        import shutil as _shutil
+        if _shutil.which("mmdc") or __import__("os").getenv("MERMAID_CLI"):
+            from .diagram_service import build_diagram_artifact_for_mermaid
+            for attempt in range(2):
+                try:
+                    artifact = build_diagram_artifact_for_mermaid(
+                        diagram_type=diagram_type, mermaid_source=mermaid_source,
+                        out_dir=out_dir, base_name=base_name,
+                    )
+                    meta = write_artifact_files(default_storage_base(), payload.project_id or 0, None, [artifact])
+                    fm = meta["files"][0] if meta.get("files") else {}
+                    svg_path, png_path = fm.get("svg_path"), fm.get("png_path")
+                    break
+                except Exception as exc:
+                    logger.warning("[DiagramGenerate] mmdc attempt %d failed: %s", attempt + 1, exc)
+
+        # 2) Guaranteed fallback: native renderer (no external deps, never fails).
+        if not svg_path or not png_path:
+            try:
+                native_svg, native_png = native_render(spec, out_dir, base_name)
+                source_format = "native-svg"
+                artifact = DiagramArtifact(
+                    diagram_type=diagram_type, source_format=source_format,
+                    source=mermaid_source,
+                    svg_bytes=native_svg.read_bytes(), png_bytes=native_png.read_bytes(),
+                    source_filename=f"{base_name}.mmd", svg_filename=native_svg.name,
+                    png_filename=native_png.name,
+                )
+                meta = write_artifact_files(default_storage_base(), payload.project_id or 0, None, [artifact])
+                fm = meta["files"][0] if meta.get("files") else {}
+                svg_path, png_path = fm.get("svg_path"), fm.get("png_path")
+            except Exception as exc:
+                # This should be unreachable (native renderer has no external
+                # deps) but guard anyway so the endpoint never 500s.
+                logger.error("[DiagramGenerate] Native renderer failed unexpectedly: %s", exc, exc_info=True)
+                status = "generation_failed"
+
+        return DiagramGenerateResponse(
+            diagram_type=diagram_type,
+            source_format=source_format,
+            source=mermaid_source,
+            svg_url=svg_path,
+            png_url=png_path,
+            status=status,
+        )
+
+    def _spec_to_mermaid(spec) -> str:
+        """Best-effort mermaid representation of a DiagramSpec, kept as the
+        editable/portable `source` field even when rendering falls back to
+        the native renderer."""
+        if spec.diagram_type == "sequence" and spec.actors:
+            lines = ["sequenceDiagram"]
+            for a in spec.actors:
+                lines.append(f'    participant {re.sub(r"[^A-Za-z0-9_]", "", a) or "A"} as {a}')
+            for i in range(len(spec.actors) - 1):
+                a1 = re.sub(r"[^A-Za-z0-9_]", "", spec.actors[i]) or "A"
+                a2 = re.sub(r"[^A-Za-z0-9_]", "", spec.actors[i + 1]) or "B"
+                lines.append(f"    {a1}->>{a2}: step {i + 1}")
+            return "\n".join(lines)
+        if spec.layers:
+            lines = ["flowchart TD"]
+            prev = None
+            for i, layer in enumerate(spec.layers):
+                label = ", ".join(layer) if layer else f"Layer {i+1}"
+                node_id = f"L{i}"
+                lines.append(f'    {node_id}["{label}"]')
+                if prev:
+                    lines.append(f"    {prev} --> {node_id}")
+                prev = node_id
+            return "\n".join(lines)
+        nodes = spec.nodes or ["Start", "End"]
+        lines = ["flowchart LR"]
+        for i, n in enumerate(nodes):
+            lines.append(f'    N{i}["{n}"]')
+        for a, b in (spec.edges or [(i, i + 1) for i in range(len(nodes) - 1)]):
+            lines.append(f"    N{a} --> N{b}")
+        return "\n".join(lines)
 
     @app_router.post(
         "/media-studio/diagram/generate",
@@ -1050,13 +1394,32 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
         if not slides:
             raise HTTPException(422, "No slides found. Generate a presentation first.")
 
+        # Presenter type maps to the render mode: "human" → SadTalker lip-sync,
+        # everything else → narrated slideshow (optionally cartoon-overlaid).
+        presenter_type = payload.get("presenter_type") or (
+            "human" if payload.get("mode") == "avatar" else "cartoon"
+        )
+        voice = payload.get("voice") or {}
         job = create_job(
             project_id=project_id,
             slides=slides,
             mode=payload.get("mode", "slides"),
-            theme_id=payload.get("theme_id", "ey_dark"),
+            theme_id=payload.get("theme_id", "ey"),
             voice_id=payload.get("voice_id", "samantha"),
             avatar_id=payload.get("avatar_id", "professional_male"),
+            presenter_type=presenter_type,
+            presenter_position=str(payload.get("presenter_position", "right")),
+            voice_speed=float(voice.get("speed", payload.get("voice_speed", 1.0))),
+            voice_pitch=float(voice.get("pitch", payload.get("voice_pitch", 1.0))),
+            voice_volume=float(voice.get("volume", payload.get("voice_volume", 1.0))),
+            voice_emotion=str(voice.get("emotion", payload.get("voice_emotion", "confident"))),
+            narration_style=str(voice.get("style", payload.get("narration_style", "consultant"))),
+            pause_scale=float(voice.get("pause", payload.get("pause_scale", 1.0))),
+            emphasis=float(voice.get("emphasis", payload.get("emphasis", 1.0))),
+            resolution=str(payload.get("resolution", "1080p")),
+            fps=int(payload.get("fps", 30)),
+            captions=bool(payload.get("captions", False)),
+            motion=bool(payload.get("motion", payload.get("camera_motion", True))),
         )
         _executor.submit(run_pipeline, job, get_db_fn, _save_video_artifacts)
 
@@ -1065,6 +1428,7 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
             "status": "started",
             "slide_count": len(slides),
             "mode": job.mode,
+            "presenter_type": job.presenter_type,
             "theme_id": job.theme_id,
             "voice_id": job.voice_id,
         }
@@ -1100,6 +1464,7 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
             "duration_seconds": job.duration_seconds,
             "eta_seconds": job.eta_seconds,
             "fallback_used": job.fallback_used,
+            "avatar_error": job.avatar_error,
             "error": job.error,
         }
 
@@ -1169,9 +1534,146 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
     def list_voices(current_user=Depends(get_current_user_fn)):
         return [{"id": k, **v} for k, v in VOICES.items()]
 
+    @app_router.post("/video/render/voice-preview", summary="Synthesize a short narration sample")
+    async def voice_preview(payload: dict, current_user=Depends(get_current_user_fn)):
+        """Render a short WAV sample with the requested voice + delivery controls
+        so users can hear the narration before committing to a full render."""
+        from .video_pipeline_local import LocalTTSService, VoiceControls, VIDEO_OUTPUT_DIR
+        import uuid as _uuid
+        voice = payload.get("voice", {}) if isinstance(payload.get("voice"), dict) else {}
+        sample = (payload.get("text") or
+                  "Good morning. Let me walk you through how this solution delivers "
+                  "real business value, from the problem statement through to the return on investment.")
+        controls = VoiceControls(
+            voice_id=payload.get("voice_id", voice.get("voice_id", "samantha")),
+            speed=float(voice.get("speed", payload.get("voice_speed", 1.0))),
+            pitch=float(voice.get("pitch", payload.get("voice_pitch", 1.0))),
+            volume=float(voice.get("volume", payload.get("voice_volume", 1.0))),
+            emotion=str(voice.get("emotion", payload.get("voice_emotion", "confident"))),
+            narration_style=str(voice.get("style", payload.get("narration_style", "consultant"))),
+            pause_scale=float(voice.get("pause", payload.get("pause_scale", 1.0))),
+        )
+        out = VIDEO_OUTPUT_DIR / f"preview_{_uuid.uuid4().hex[:8]}.wav"
+        try:
+            await run_in_threadpool(LocalTTSService().synthesize, sample, out, controls=controls)
+        except Exception as exc:
+            raise HTTPException(500, f"Voice preview failed: {exc}")
+        return FileResponse(str(out), media_type="audio/wav", filename="voice_preview.wav")
+
     @app_router.get("/video/render/themes", summary="List available slide themes")
     def list_themes(current_user=Depends(get_current_user_fn)):
         return [{"id": k, "label": v["label"]} for k, v in THEMES.items()]
+
+    @app_router.get("/video/render/presenters", summary="Presenter type availability + persona list")
+    def list_presenters(current_user=Depends(get_current_user_fn)):
+        """Real, proactive availability check for each presenter type so the UI
+        never has to discover 'Human Avatar' is broken after a failed render.
+        Cartoon / Voice Only / No Presenter never depend on SadTalker and are
+        always available."""
+        from .video_pipeline_local import sadtalker_status, AVATAR_SOURCE_MAP
+        status = sadtalker_status()
+        return {
+            "presenter_types": [
+                {"id": "cartoon", "label": "Cartoon Presenter", "available": True,
+                 "message": "Professional animated presenter — always available."},
+                {"id": "human", "label": "Human Avatar", "available": status["available"],
+                 "message": status["message"]},
+                {"id": "voice_only", "label": "Voice Only", "available": True,
+                 "message": "Narrated slides — always available."},
+                {"id": "none", "label": "No Presenter", "available": True,
+                 "message": "Slides with captions — always available."},
+            ],
+            "sadtalker": status,
+            "personas": list(AVATAR_SOURCE_MAP.keys()),
+        }
+
+    @app_router.post("/video/render/presenters/recheck", summary="Force re-probe SadTalker availability")
+    def recheck_presenters(current_user=Depends(get_current_user_fn)):
+        from .video_pipeline_local import sadtalker_status
+        return sadtalker_status(force=True)
+
+    # ── Local AI model selection (Settings → active model + fallback chain) ────
+    @app_router.get("/settings/ai-model", summary="List local models + active selection")
+    def get_ai_model(current_user=Depends(get_current_user_fn)):
+        """Returns the preferred model chain, the currently pinned primary
+        model, and which models are actually installed in Ollama."""
+        from .agents.llm_client import DEFAULT_MODEL_CHAIN, OllamaClient
+        installed: list[str] = []
+        try:
+            installed = OllamaClient()._list_installed()
+        except Exception:
+            installed = []
+        # Curated, user-facing preference order (Qwen3 32B → 14B → DeepSeek R1 → Gemma)
+        preferred = [
+            {"id": "qwen3:32b", "label": "Qwen3 32B (best quality)"},
+            {"id": "qwen3:14b", "label": "Qwen3 14B (balanced)"},
+            {"id": "deepseek-r1:14b", "label": "DeepSeek R1 14B (reasoning)"},
+            {"id": "deepseek-r1:8b", "label": "DeepSeek R1 8B"},
+            {"id": "gemma2:9b", "label": "Gemma 2 9B (fast, local)"},
+            {"id": "gemma2:latest", "label": "Gemma 2 (latest)"},
+            {"id": "llama3.1:8b", "label": "Llama 3.1 8B"},
+        ]
+        return {
+            "provider": os.getenv("LLM_PROVIDER", "ollama"),
+            "base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            "active_model": os.getenv("OLLAMA_MODEL") or DEFAULT_MODEL_CHAIN[0],
+            "fallback_chain": (os.getenv("OLLAMA_MODEL_FALLBACKS") or ",".join(DEFAULT_MODEL_CHAIN)).split(","),
+            "auto_fallback": os.getenv("OLLAMA_AUTO_FALLBACK", "true").lower() != "false",
+            "preferred": preferred,
+            "installed": installed,
+        }
+
+    @app_router.post("/settings/ai-model/test", summary="Test connection to the local model endpoint")
+    def test_ai_model(payload: dict | None = None, current_user=Depends(get_current_user_fn)):
+        """Ping Ollama and confirm the requested model is available — powers the
+        'Test Connection' button in the Video Studio model configuration."""
+        import time as _t
+        import requests as _rq
+        payload = payload or {}
+        base = (payload.get("base_url") or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
+        model = payload.get("model") or os.getenv("OLLAMA_MODEL")
+        t0 = _t.time()
+        try:
+            resp = _rq.get(f"{base}/api/tags", timeout=8)
+            resp.raise_for_status()
+            installed = [m.get("name", "") for m in resp.json().get("models", [])]
+            latency_ms = int((_t.time() - t0) * 1000)
+            model_ok = (not model) or any(
+                n == model or n.split(":")[0] == str(model).split(":")[0] for n in installed
+            )
+            return {
+                "ok": True,
+                "reachable": True,
+                "latency_ms": latency_ms,
+                "installed_count": len(installed),
+                "model": model,
+                "model_available": model_ok,
+                "message": f"Connected to Ollama at {base} · {len(installed)} models · {latency_ms}ms"
+                           + ("" if model_ok else f" · '{model}' not pulled (will use fallback)"),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "reachable": False,
+                "message": f"Could not reach Ollama at {base}: {exc}",
+            }
+
+    @app_router.post("/settings/ai-model", summary="Set active local model + fallback chain")
+    def set_ai_model(payload: dict, current_user=Depends(get_current_user_fn)):
+        """Persist the active model / fallback chain into the process env so the
+        OllamaClient picks it up on the next generation. `model` pins the primary;
+        `fallback_chain` (optional list) overrides the whole ordered chain."""
+        model = payload.get("model")
+        chain = payload.get("fallback_chain")
+        if model:
+            os.environ["OLLAMA_MODEL"] = str(model)
+        if isinstance(chain, list) and chain:
+            os.environ["OLLAMA_MODEL_FALLBACKS"] = ",".join(str(m) for m in chain)
+        return {
+            "status": "saved",
+            "active_model": os.getenv("OLLAMA_MODEL"),
+            "fallback_chain": (os.getenv("OLLAMA_MODEL_FALLBACKS") or "").split(",") if os.getenv("OLLAMA_MODEL_FALLBACKS") else [],
+        }
 
     # ── NEW: Latest completed video for a project ─────────────────────────────
     @app_router.get("/video/render/latest/{project_id}", summary="Get latest completed render for project")
@@ -1243,21 +1745,51 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
             .first()
         )
         lines = [f"# Narration Script — Project {project_id}\n"]
+        slides: list = []
         if pres_art:
             try:
                 data = json.loads(pres_art.content or "{}")
                 slides = data.get("slides") or data.get("slide_outline") or []
-                for i, s in enumerate(slides):
-                    title = s.get("title", f"Slide {i+1}")
-                    notes = s.get("speaker_notes") or s.get("narration") or s.get("notes") or ""
-                    content = s.get("content") or ""
-                    lines.append(f"\n## Slide {i+1}: {title}\n")
-                    if notes:
-                        lines.append(f"**Speaker Notes:** {notes}\n")
-                    if content:
-                        lines.append(f"{content}\n")
             except Exception:
-                lines.append("(Could not parse presentation artifact)")
+                slides = []
+        if not slides:
+            # The "quick" video-editor flow (build slides in the workspace,
+            # hit Generate Video) never persists a `presentation` artifact —
+            # only the rendered video's metadata (job_id, duration, path).
+            # Fall back to the in-memory render job for that video, keyed by
+            # the job_id recorded on the presentation_video artifact, so the
+            # script export works for that flow too, not only decks produced
+            # via /generate/presentation.
+            try:
+                from .video_pipeline_local import VIDEO_JOBS
+                video_art = (
+                    db.query(GeneratedArtifact)
+                    .filter(
+                        GeneratedArtifact.project_id == project_id,
+                        GeneratedArtifact.artifact_type == "presentation_video",
+                    )
+                    .order_by(GeneratedArtifact.created_at.desc())
+                    .first()
+                )
+                if video_art:
+                    meta = json.loads(video_art.content or "{}")
+                    job = VIDEO_JOBS.get(meta.get("job_id", ""))
+                    if job:
+                        slides = job.slides
+            except Exception:
+                slides = []
+        if slides:
+            for i, s in enumerate(slides):
+                title = s.get("title", f"Slide {i+1}")
+                notes = s.get("speaker_notes") or s.get("narration") or s.get("notes") or ""
+                content = s.get("content") or ""
+                lines.append(f"\n## Slide {i+1}: {title}\n")
+                if notes:
+                    lines.append(f"**Speaker Notes:** {notes}\n")
+                if content:
+                    lines.append(f"{content}\n")
+        else:
+            lines.append("(No presentation or rendered video found for this project.)")
         return PlainTextResponse("\n".join(lines), media_type="text/plain",
                                   headers={"Content-Disposition": f"attachment; filename=script_project_{project_id}.txt"})
 
@@ -1342,9 +1874,12 @@ Return ONLY a JSON object (no markdown, no explanation) with keys:
 
         try:
             from . import ai_service as _ai
+            # Honour the Settings-selected model / fallback chain instead of a
+            # hardcoded model, so this respects local model switching.
+            active_model = os.getenv("OLLAMA_MODEL") or "llama3.1:8b-instruct-q4_K_M"
             result = await run_in_threadpool(
                 _ai._live_generate, provider or "ollama", api_key, system, user_msg,
-                model="llama3.1:8b-instruct-q4_K_M"
+                model=active_model
             )
             if result and isinstance(result, dict) and "title" in result:
                 return {"success": True, "slide": result}
@@ -1358,13 +1893,24 @@ Return ONLY a JSON object (no markdown, no explanation) with keys:
             "regenerate": f"• Strategic overview of {title}\n• Key implementation approaches\n• Expected outcomes and benefits\n• Success metrics and milestones",
         }.get(action, content)
 
+        # Consultant-style fallback narration — never "this slide shows/covers".
+        first_point = ""
+        for line in str(fallback_content).split("\n"):
+            cleaned = line.lstrip("•-–— ").strip()
+            if cleaned:
+                first_point = cleaned
+                break
+        fallback_notes = notes or (
+            f"Let's talk about {title.lower()}. {first_point}. "
+            f"What matters here is how this moves the engagement forward and the value it unlocks for the business."
+        )
         return {
             "success": True,
             "slide": {
                 "title": title,
                 "subtitle": subtitle,
                 "content": fallback_content,
-                "speaker_notes": notes or f"This slide covers {title}. {fallback_content[:100]}...",
+                "speaker_notes": fallback_notes,
             }
         }
 
@@ -1422,85 +1968,98 @@ Return ONLY the narration text — no JSON, no markdown, just the words to speak
             ]
         }
 
-    @app_router.post("/video/render/from-pdf", summary="Generate video from uploaded PDF")
+    @app_router.post("/video/render/from-pdf", summary="Understand a PDF and generate a full narrated presentation video")
     async def render_from_pdf(
         pdf_file: UploadFile = File(...),
         project_id: int = Form(...),
         mode: str = Form("slides"),
+        theme_id: str = Form("ey"),
         voice_id: str = Form("samantha"),
         voice_speed: float = Form(1.0),
         avatar_id: str = Form("professional_male"),
+        presenter_type: str = Form("cartoon"),
         gen_mode: str = Form("presentation_video"),
         db=Depends(get_db_fn),
         current_user=Depends(get_current_user_fn),
     ):
-        """Accept a PDF, extract text per page, build slides, then trigger video render."""
-        import tempfile, os, re
+        """PDF -> understand the document -> consulting-quality presentation
+        (with diagrams where relevant) -> editable script -> voice -> video.
+
+        Fully automatic, no manual intervention. A single bounded LLM call
+        (<=55s, small/fast planning model) turns the document into a
+        structured, narrated slide deck; if the model is unavailable or
+        times out, a deterministic section-based builder produces an
+        equally complete (if less bespoke) deck instantly, so this endpoint
+        never hangs and never fails outright."""
+        import tempfile, os as _os
 
         if not pdf_file.filename or not pdf_file.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Only PDF files are accepted")
 
-        # Save uploaded file
         contents = await pdf_file.read()
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp.write(contents)
             tmp_path = tmp.name
 
-        slides = []
         try:
-            try:
-                import pdfplumber
-                with pdfplumber.open(tmp_path) as pdf:
-                    for i, page in enumerate(pdf.pages):
-                        text = (page.extract_text() or "").strip()
-                        lines = [l.strip() for l in text.splitlines() if l.strip()]
-                        title = lines[0][:100] if lines else f"Page {i+1}"
-                        body = "\n".join(f"• {l}" for l in lines[1:15]) if len(lines) > 1 else ""
-                        slides.append({
-                            "title": title,
-                            "subtitle": "",
-                            "content": body,
-                            "speaker_notes": text[:500],
-                            "layout": "title" if i == 0 else "content",
-                            "duration": max(20, min(90, len(text.split()) // 3)),
-                        })
-            except ImportError:
-                # fallback: use PyPDF2
-                try:
-                    import PyPDF2
-                    reader = PyPDF2.PdfReader(tmp_path)
-                    for i, page in enumerate(reader.pages):
-                        text = (page.extract_text() or "").strip()
-                        lines = [l.strip() for l in text.splitlines() if l.strip()]
-                        title = lines[0][:100] if lines else f"Page {i+1}"
-                        body = "\n".join(f"• {l}" for l in lines[1:15]) if len(lines) > 1 else ""
-                        slides.append({
-                            "title": title, "subtitle": "", "content": body,
-                            "speaker_notes": text[:500],
-                            "layout": "title" if i == 0 else "content",
-                            "duration": max(20, min(90, len(text.split()) // 3)),
-                        })
-                except ImportError:
-                    raise HTTPException(status_code=500, detail="PDF parsing library not installed. Run: pip install pdfplumber")
+            full_text, page_count = _extract_pdf_text(tmp_path)
         finally:
-            os.unlink(tmp_path)
+            _os.unlink(tmp_path)
 
-        if not slides:
+        if not full_text.strip():
             raise HTTPException(status_code=422, detail="No text could be extracted from the PDF")
 
-        # Submit using the same job executor pattern as /video/render
+        project = db.get(Project, project_id)
+        project_name = project.name if project else (pdf_file.filename or "Document").rsplit(".", 1)[0]
+
+        slides = await run_in_threadpool(
+            _understand_document_to_slides, full_text, project_name, page_count
+        )
+
         job = create_job(
             project_id=project_id,
             slides=slides,
             mode=mode,
-            theme_id="ey_light",
+            theme_id=theme_id,
             voice_id=voice_id,
             avatar_id=avatar_id,
+            presenter_type=presenter_type,
+            voice_speed=voice_speed,
         )
-        job.message = f"PDF source: {pdf_file.filename} ({len(slides)} pages)"
+        job.message = f"PDF source: {pdf_file.filename} ({page_count} pages -> {len(slides)} slides)"
         _executor.submit(run_pipeline, job, get_db_fn, _save_video_artifacts)
 
-        return {"job_id": job.job_id, "slide_count": len(slides), "source": "pdf"}
+        return {
+            "job_id": job.job_id, "slide_count": len(slides), "source": "pdf",
+            "slides": slides,  # returned so the UI can open the editable script immediately
+        }
+
+    @app_router.post("/video/import-pptx", summary="Import an existing .pptx as editable slides")
+    async def import_pptx(
+        pptx_file: UploadFile = File(...),
+        current_user=Depends(get_current_user_fn),
+    ):
+        """Parse an uploaded .pptx back into the same editable slide-dict shape
+        used everywhere else in the workspace (title/subtitle/content/
+        speaker_notes/layout), so a deck the user already has can be dropped
+        in and continued here rather than starting from scratch. Unlike
+        /video/render/from-pdf this does not start a render job — the user
+        edits first, then renders explicitly."""
+        from .pptx_importer import parse_pptx_to_slides
+
+        if not pptx_file.filename or not pptx_file.filename.lower().endswith(".pptx"):
+            raise HTTPException(status_code=400, detail="Only .pptx files are accepted")
+
+        contents = await pptx_file.read()
+        try:
+            slides = await run_in_threadpool(parse_pptx_to_slides, contents)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except Exception as exc:
+            logger.error("[PptxImport] Failed to parse %s: %s", pptx_file.filename, exc, exc_info=True)
+            raise HTTPException(status_code=422, detail=f"Could not read this .pptx file: {exc}")
+
+        return {"slide_count": len(slides), "source": "pptx", "slides": slides}
 
     logger.info(
         "[PresentationRoutes] Routes registered: POST /generate/presentation, "

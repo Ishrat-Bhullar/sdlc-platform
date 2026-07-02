@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -22,7 +22,7 @@ import {
 import { Card } from '../components/ui/Card';
 import { NewProjectWizard } from '../components/shared/NewProjectWizard';
 import { useAuth } from '../lib/auth';
-import { apiRequest } from '../lib/api';
+import { apiRequest, FASTAPI_BASE_URL } from '../lib/api';
 import { mockProjects, mockProjectTemplates } from '../data/mockData';
 
 const uploadOptions = [
@@ -88,6 +88,9 @@ export function AIWorkspace() {
     data: unknown;
   } | null>(null);
   const [activeProject, setActiveProject] = useState<ProjectResponse | null>(null);
+  const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [uploadDocType, setUploadDocType] = useState<string>('brd');
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
   const { user } = useAuth();
 
@@ -122,6 +125,61 @@ export function AIWorkspace() {
   const openProjectWizard = () => {
     setGenerateError(null);
     setShowWizard(true);
+  };
+
+  const openFilePicker = (docType: string) => {
+    setUploadDocType(docType);
+    fileInputRef.current?.click();
+  };
+
+  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-selecting the same file later
+    if (!file) return;
+
+    setUploadingDoc(true);
+    setGenerateError(null);
+    try {
+      // 1) Create the project (placeholder description; ingestion below folds
+      //    the real extracted document text into it before the pipeline runs).
+      const baseName = file.name.replace(/\.[^.]+$/, '');
+      const project = await apiRequest<ProjectResponse>('/projects', {
+        method: 'POST',
+        body: {
+          project_name: baseName.slice(0, 80) || 'Uploaded Project',
+          description: `Project created from uploaded document: ${file.name}`,
+          project_type: 'standalone_ai_generation',
+          execution_mode: 'autonomous',
+          build_type: 'full_stack',
+          deliverables: ['SRS', 'User Stories', 'Architecture Documents', 'API Documents'],
+          providers: {},
+        },
+      });
+      setActiveProject(project);
+
+      // 2) Upload + ingest the document — the backend extracts PDF/DOCX text
+      //    and folds it into the project description.
+      const form = new FormData();
+      form.append('project_id', String(project.id));
+      form.append('document_type', uploadDocType);
+      form.append('file', file);
+      const ingestRes = await fetch(`${FASTAPI_BASE_URL}/ingestion/upload`, {
+        method: 'POST', credentials: 'include', body: form,
+      });
+      if (!ingestRes.ok) {
+        const detail = await ingestRes.json().catch(() => ({}));
+        throw new Error(detail.detail || 'Document ingestion failed');
+      }
+
+      // 3) Launch the full autonomous pipeline against the ingested content.
+      await apiRequest('/build/start', { method: 'POST', body: { project_id: project.id } });
+
+      navigate('/app/dashboard', { state: { refresh: true, projectId: project.id } });
+    } catch (error) {
+      setGenerateError(error instanceof Error ? error.message : 'Document upload failed.');
+    } finally {
+      setUploadingDoc(false);
+    }
   };
 
   const handleGenerate = async (action: GenerateAction) => {
@@ -248,7 +306,11 @@ export function AIWorkspace() {
                     {uploadOptions.map((option) => (
                       <button
                         key={option.id}
-                        className="flex flex-col items-center gap-1 rounded-lg border border-dark-border p-3 text-center transition-all hover:border-ey-yellow/50 hover:bg-ey-yellow/5"
+                        type="button"
+                        disabled={uploadingDoc || option.id === 'jira'}
+                        onClick={() => openFilePicker(option.id)}
+                        title={option.id === 'jira' ? 'Use MCP Integration Center to connect Jira' : `Upload a ${option.label}`}
+                        className="flex flex-col items-center gap-1 rounded-lg border border-dark-border p-3 text-center transition-all hover:border-ey-yellow/50 hover:bg-ey-yellow/5 disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         <option.icon className="h-5 w-5 text-text-secondary" />
                         <span className="text-xs font-medium text-text-primary">{option.label}</span>
@@ -260,16 +322,24 @@ export function AIWorkspace() {
               </AnimatePresence>
 
               {/* Actions */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.doc,.docx,.txt,.md"
+                className="hidden"
+                onChange={handleFileSelected}
+              />
               <div className="flex items-center justify-between border-t border-dark-border pt-4">
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-text-muted">
-                    Upload documents or describe requirements
+                    {uploadingDoc ? 'Uploading and ingesting document…' : 'Upload documents or describe requirements'}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <button className="btn-secondary text-sm">
+                  <button type="button" disabled={uploadingDoc} onClick={() => openFilePicker('pdf')}
+                    className="btn-secondary text-sm disabled:cursor-not-allowed disabled:opacity-50">
                     <Upload className="mr-2 h-4 w-4" />
-                    Upload
+                    {uploadingDoc ? 'Uploading…' : 'Upload'}
                   </button>
                   <button onClick={openProjectWizard} className="btn-primary text-sm">
                     <Send className="mr-2 h-4 w-4" />

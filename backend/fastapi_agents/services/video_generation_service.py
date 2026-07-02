@@ -13,25 +13,21 @@ in turn called from `routes/presentation_routes.py`.
 Components:
     NarrationService   — Azure Speech (primary) -> Coqui XTTS (fallback) TTS
     SlideRenderer       — PPTX -> per-slide PNG via LibreOffice headless + pdf2image
-    VideoComposer        — slide images + narration audio -> MP4 (MoviePy/FFmpeg)
-    AvatarVideoService  — talking-avatar MP4 via the Hedra API
+    VideoComposer        — slide images + narration audio -> MP4 (FFmpeg)
 
 No mock/placeholder logic: every method either performs the real operation or
 raises a clear, actionable exception that callers can catch to apply a
-fallback (e.g. Hedra failure -> narrated-slideshow-only video).
+fallback. AI avatar generation (talking-head lip-sync) lives separately in
+video_pipeline_local.py's SadTalkerAvatarService — fully local, no paid API.
 """
 from __future__ import annotations
 
 import logging
 import os
 import subprocess
-import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
-
-import requests
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +63,7 @@ class AvatarRenderConfig:
     avatar_value: str = "Professional Male"
     scene: str = "Office"
     background: str = ""
-    image_url: str | None = None       # optional explicit avatar portrait for Hedra
+    image_url: str | None = None       # optional user-supplied avatar portrait
 
 
 # ---------------------------------------------------------------------------
@@ -231,20 +227,25 @@ class SlideRenderer:
 
 
 # ---------------------------------------------------------------------------
-# Video composition: slide images + narration audio -> MP4 via MoviePy/FFmpeg
+# Video composition: slide images + narration audio -> MP4 via pure FFmpeg
+# (no MoviePy — matches the migration already done in video_pipeline_local.py,
+# so there is exactly one video-encoding strategy in the codebase).
 # ---------------------------------------------------------------------------
 
 class VideoComposer:
     """Combines per-slide images and matching per-slide narration audio into
-    a single narrated MP4. MoviePy shells out to FFmpeg for final encoding,
-    so a working ffmpeg binary must be available on PATH (or set IMAGEIO_FFMPEG_EXE)."""
+    a single narrated MP4 by shelling out to ffmpeg directly per slide, then
+    concatenating — the same approach as the live /video/render pipeline.
+    Requires a working ffmpeg + ffprobe binary on PATH."""
 
     def __init__(self, fps: int = 24, resolution: tuple[int, int] = (1920, 1080)):
         self.fps = fps
         self.resolution = resolution
 
     def compose(self, slide_images: list[Path], slide_audio: list[Path], out_path: Path) -> Path:
-        from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips  # type: ignore
+        import subprocess
+        import shutil as _shutil
+        import uuid as _uuid
 
         if not slide_images:
             raise ValueError("[VideoComposer] No slide images provided")
@@ -254,188 +255,46 @@ class VideoComposer:
                 f"slide_audio ({len(slide_audio)}) count mismatch"
             )
 
-        clips = []
-        audio_clips = []
-        try:
-            for img_path, audio_path in zip(slide_images, slide_audio):
-                audio_clip = AudioFileClip(str(audio_path))
-                audio_clips.append(audio_clip)
-                duration = max(audio_clip.duration, 1.0)
-                image_clip = (
-                    ImageClip(str(img_path))
-                    .set_duration(duration)
-                    .resize(newsize=self.resolution)
-                    .set_audio(audio_clip)
-                )
-                clips.append(image_clip)
-
-            final = concatenate_videoclips(clips, method="compose")
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            final.write_videofile(
-                str(out_path),
-                fps=self.fps,
-                codec="libx264",
-                audio_codec="aac",
-                threads=4,
-                logger=None,
-            )
-            final.close()
-        finally:
-            for c in clips:
-                try:
-                    c.close()
-                except Exception:
-                    pass
-            for a in audio_clips:
-                try:
-                    a.close()
-                except Exception:
-                    pass
-
-        return out_path
-
-
-# ---------------------------------------------------------------------------
-# AI Avatar video generation via the Hedra API
-# ---------------------------------------------------------------------------
-
-class HedraAvatarError(RuntimeError):
-    """Raised for any Hedra configuration/API/timeout failure. Callers treat
-    this as a recoverable condition and fall back to the narrated slideshow
-    video rather than failing the whole generation."""
-
-
-class AvatarVideoService:
-    """Generates a talking-avatar video using the Hedra API
-    (https://www.hedra.com). Requires HEDRA_API_KEY. Reuses the
-    already-synthesized narration audio (via NarrationService) as the
-    avatar's voice track, so narration stays consistent between the
-    narrated-slideshow and avatar render modes."""
-
-    BASE_URL = os.getenv("HEDRA_API_BASE_URL", "https://api.hedra.com/web-app/public")
-
-    def __init__(self, api_key: str | None = None, poll_interval: float = 5.0, timeout: float = 600.0):
-        self.api_key = api_key or os.getenv("HEDRA_API_KEY")
-        self.poll_interval = poll_interval
-        self.timeout = timeout
-
-    def _headers(self) -> dict:
-        if not self.api_key:
-            raise HedraAvatarError("HEDRA_API_KEY is not configured")
-        return {"X-API-KEY": self.api_key, "Accept": "application/json"}
-
-    def generate(
-        self,
-        narration_audio_path: Path,
-        avatar_config: AvatarRenderConfig,
-        out_path: Path,
-        progress_cb: ProgressCallback = None,
-    ) -> Path:
-        if not self.api_key:
-            raise HedraAvatarError("HEDRA_API_KEY is not configured — cannot use Hedra avatar mode")
-
-        _emit(progress_cb, "generating_avatar", 60, "Uploading narration audio to Hedra")
-        audio_asset_id = self._upload_asset(narration_audio_path, asset_type="audio")
-
-        image_asset_id = None
-        if avatar_config.image_url:
-            image_asset_id = self._upload_asset_from_url(avatar_config.image_url, asset_type="image")
-
-        _emit(progress_cb, "generating_avatar", 65, "Requesting Hedra avatar generation job")
-        job_id = self._create_generation_job(audio_asset_id, image_asset_id, avatar_config)
-
-        _emit(progress_cb, "generating_avatar", 70, "Rendering avatar video (this can take a few minutes)")
-        video_url = self._poll_job(job_id, progress_cb)
-
-        _emit(progress_cb, "generating_avatar", 90, "Downloading avatar video")
-        self._download(video_url, out_path)
-        return out_path
-
-    def _upload_asset(self, file_path: Path, asset_type: str) -> str:
-        create_resp = requests.post(
-            f"{self.BASE_URL}/assets",
-            headers=self._headers(),
-            json={"name": file_path.name, "type": asset_type},
-            timeout=30,
-        )
-        self._raise_for_status(create_resp, "create asset")
-        asset_id = create_resp.json()["id"]
-
-        with open(file_path, "rb") as f:
-            upload_resp = requests.post(
-                f"{self.BASE_URL}/assets/{asset_id}/upload",
-                headers=self._headers(),
-                files={"file": (file_path.name, f)},
-                timeout=120,
-            )
-        self._raise_for_status(upload_resp, "upload asset")
-        return asset_id
-
-    def _upload_asset_from_url(self, image_url: str, asset_type: str) -> str:
-        img_resp = requests.get(image_url, timeout=30)
-        img_resp.raise_for_status()
-        tmp_path = Path(tempfile.gettempdir()) / f"hedra_avatar_src_{int(time.time())}.png"
-        tmp_path.write_bytes(img_resp.content)
-        try:
-            return self._upload_asset(tmp_path, asset_type)
-        finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-    def _create_generation_job(
-        self, audio_asset_id: str, image_asset_id: str | None, avatar_config: AvatarRenderConfig
-    ) -> str:
-        prompt = f"A {avatar_config.avatar_value} presenting in a {avatar_config.scene} setting"
-        if avatar_config.background:
-            prompt += f", background: {avatar_config.background}"
-
-        payload: dict = {
-            "type": "video",
-            "ai_model_id": os.getenv("HEDRA_MODEL_ID", "hedra-character-2"),
-            "audio_id": audio_asset_id,
-            "generated_video_inputs": {"text_prompt": prompt},
-        }
-        if image_asset_id:
-            payload["start_keyframe_id"] = image_asset_id
-
-        resp = requests.post(f"{self.BASE_URL}/generations", headers=self._headers(), json=payload, timeout=30)
-        self._raise_for_status(resp, "create generation job")
-        return resp.json()["id"]
-
-    def _poll_job(self, job_id: str, progress_cb: ProgressCallback) -> str:
-        start = time.time()
-        last_pct = 70
-        while time.time() - start < self.timeout:
-            resp = requests.get(f"{self.BASE_URL}/generations/{job_id}/status", headers=self._headers(), timeout=30)
-            self._raise_for_status(resp, "poll generation status")
-            data = resp.json()
-            status_value = data.get("status")
-
-            if status_value == "complete":
-                video_url = data.get("url") or (data.get("asset") or {}).get("url")
-                if not video_url:
-                    raise HedraAvatarError("Hedra job completed but returned no video URL")
-                return video_url
-            if status_value in ("error", "failed"):
-                raise HedraAvatarError(f"Hedra generation job failed: {data.get('error_message', 'unknown error')}")
-
-            last_pct = min(last_pct + 2, 88)
-            _emit(progress_cb, "generating_avatar", last_pct, f"Avatar rendering in progress ({status_value})")
-            time.sleep(self.poll_interval)
-
-        raise HedraAvatarError(f"Hedra generation job {job_id} timed out after {self.timeout}s")
-
-    def _download(self, url: str, out_path: Path) -> None:
-        resp = requests.get(url, stream=True, timeout=120)
-        resp.raise_for_status()
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+        rw, rh = self.resolution
+        tmp_dir = out_path.parent / f"clips_{_uuid.uuid4().hex[:8]}"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            clip_paths: list[Path] = []
+            for i, (img_path, audio_path) in enumerate(zip(slide_images, slide_audio)):
+                clip = tmp_dir / f"slide_{i:03d}.mp4"
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-loop", "1", "-i", str(img_path),
+                        "-i", str(audio_path),
+                        "-vf", f"scale={rw}:{rh},fps={self.fps}",
+                        "-c:v", "libx264", "-tune", "stillimage",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-pix_fmt", "yuv420p", "-shortest",
+                        "-movflags", "+faststart",
+                        str(clip),
+                    ],
+                    check=True, capture_output=True, timeout=120,
+                )
+                clip_paths.append(clip)
 
-    @staticmethod
-    def _raise_for_status(resp: "requests.Response", action: str) -> None:
-        if resp.status_code >= 400:
-            raise HedraAvatarError(f"Hedra API error during {action}: {resp.status_code} {resp.text[:300]}")
+            list_file = tmp_dir / "concat_list.txt"
+            list_file.write_text("\n".join(f"file '{c}'" for c in clip_paths))
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "concat", "-safe", "0", "-i", str(list_file),
+                    "-c:v", "libx264", "-c:a", "aac",
+                    "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                    str(out_path),
+                ],
+                check=True, capture_output=True, timeout=300,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode(errors="ignore") if exc.stderr else str(exc)
+            raise RuntimeError(f"[VideoComposer] ffmpeg encoding failed: {stderr[-800:]}") from exc
+        finally:
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        return out_path

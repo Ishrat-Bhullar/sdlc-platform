@@ -54,6 +54,7 @@ interface RenderJob {
   duration_seconds: number;
   eta_seconds: number | null;
   fallback_used: boolean;
+  avatar_error: string | null;
   error: string | null;
 }
 
@@ -610,7 +611,23 @@ export function VideoGenerationWorkspace() {
   const [videoMode, setVideoMode] = useState<VideoMode>('slides');
   const [voiceId, setVoiceId] = useState<VoiceId>('samantha');
   const [voiceSpeed, setVoiceSpeed] = useState(1.0);
+  const [voicePitch, setVoicePitch] = useState(1.0);
+  const [voiceVolume, setVoiceVolume] = useState(1.0);
+  const [voiceEmotion, setVoiceEmotion] = useState<'confident'|'warm'|'energetic'|'calm'|'authoritative'>('confident');
   const [selectedAvatar, setSelectedAvatar] = useState('professional_male');
+  // Presenter system: cartoon (default) | human | voice_only | none
+  const [presenterType, setPresenterType] = useState<'cartoon'|'human'|'voice_only'|'none'>('cartoon');
+  const [presenterPosition, setPresenterPosition] = useState<'right'|'left'>('right');
+  // Voice delivery
+  const [narrationStyle, setNarrationStyle] = useState<'executive'|'consultant'|'professional'|'friendly'|'technical'>('consultant');
+  const [voicePause, setVoicePause] = useState(1.0);
+  const [voiceEmphasis, setVoiceEmphasis] = useState(1.0);
+  const [previewing, setPreviewing] = useState(false);
+  // Video output
+  const [resolution, setResolution] = useState<'720p'|'1080p'|'1440p'>('1080p');
+  const [fps, setFps] = useState(30);
+  const [captions, setCaptions] = useState(false);
+  const [cameraMotion, setCameraMotion] = useState(true);
 
   // Render job
   const [renderJob, setRenderJob] = useState<RenderJob | null>(null);
@@ -630,6 +647,26 @@ export function VideoGenerationWorkspace() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [pdfMode, setPdfMode] = useState(false); // when true, render from PDF instead of slides
   const pdfInputRef = useRef<HTMLInputElement>(null);
+  const [pptxImporting, setPptxImporting] = useState(false);
+  const pptxInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Presenter availability (real backend probe, not a post-render guess) ──
+  const [presenterStatus, setPresenterStatus] = useState<Record<string, { available: boolean; message: string }>>({
+    cartoon: { available: true, message: 'Always available' },
+    human: { available: true, message: 'Checking…' },
+    voice_only: { available: true, message: 'Always available' },
+    none: { available: true, message: 'Always available' },
+  });
+  const loadPresenterStatus = useCallback(() => {
+    fastApiRequest<{ presenter_types: Array<{ id: string; available: boolean; message: string }> }>(
+      '/video/render/presenters'
+    ).then(res => {
+      const next: Record<string, { available: boolean; message: string }> = {};
+      for (const p of res.presenter_types) next[p.id] = { available: p.available, message: p.message };
+      setPresenterStatus(next);
+    }).catch(() => {});
+  }, []);
+  useEffect(() => { loadPresenterStatus(); }, [loadPresenterStatus]);
 
   // ── Load previous video from DB ────────────────────────────────────────────
   useEffect(() => {
@@ -837,6 +874,58 @@ export function VideoGenerationWorkspace() {
         return;
       }
 
+      // EY branding / premium visuals → apply EY theme
+      if (/\bey\b.*brand|brand.*\bey\b|premium|more premium|polished|consulting.*look/.test(lc)) {
+        setThemeId('ey_dark');
+        say('✓ Applied EY branding — charcoal & yellow palette, EYInterstate typography, flat premium cards.');
+        return;
+      }
+
+      // Add ROI slide
+      if (/\badd\b.*\broi\b|\broi slide\b|return on investment/.test(lc)) {
+        const roi: Slide = { id: Date.now().toString(), title: 'The platform pays back within the first quarter',
+          subtitle: '', layout: 'kpi_cards',
+          content: '70% — Faster delivery\n3.2x — Return on investment\n85% — Automated coverage\n60% — Lower delivery cost',
+          speaker_notes: 'The business case is compelling. Seventy percent faster delivery, a three-point-two-times return on investment, and sixty percent lower delivery cost mean the platform pays for itself within the first quarter.',
+          duration: 30 };
+        setSlides(prev => { const n=[...prev]; n.splice(activeIdx+1,0,roi); return n; });
+        setActiveIdx(activeIdx+1);
+        say('✓ Added an ROI slide with quantified business value. Edit the numbers to match your engagement.');
+        return;
+      }
+
+      // Add implementation roadmap
+      if (/\badd\b.*(roadmap|implementation|timeline|phases)/.test(lc)) {
+        const rm: Slide = { id: Date.now().toString(), title: 'A phased implementation with a governance gate at each milestone',
+          subtitle: '', layout: 'roadmap',
+          content: 'Discovery — Requirements & alignment\nDesign — Architecture & data\nBuild — Core development\nAssure — Security, QA, UAT\nGo-Live — Production & stabilise',
+          speaker_notes: 'Delivery is phased. We move from discovery and alignment, through design and build, into assurance, and finally go-live — with a governance gate at every milestone so stakeholders stay in control.',
+          duration: 32 };
+        setSlides(prev => { const n=[...prev]; n.splice(activeIdx+1,0,rm); return n; });
+        setActiveIdx(activeIdx+1);
+        say('✓ Added an implementation roadmap slide with five phases and governance gates.');
+        return;
+      }
+
+      // Reduce slides
+      if (/\breduce\b.*slides?|fewer slides|shorten the deck|condense the deck|trim the deck/.test(lc)) {
+        if (slides.length <= 6) { say('ℹ The deck is already concise (' + slides.length + ' slides).'); return; }
+        const keep = Math.max(6, Math.round(slides.length * 0.7));
+        setSlides(prev => prev.slice(0, keep));
+        setActiveIdx(i => Math.min(i, keep - 1));
+        say(`✓ Reduced the deck from ${slides.length} to ${keep} slides, keeping the strongest narrative.`);
+        return;
+      }
+
+      // Deck-wide tone shift (business stakeholders / executive across all slides)
+      if (/(whole|entire|all|overall|presentation|deck).*(executive|business|stakeholder)|make .*(executive|for business)|business stakeholders/.test(lc)) {
+        const action: AiAction = /technical/.test(lc) ? 'technical_style' : 'executive_style';
+        say(`Applying ${action==='executive_style'?'executive':'technical'} tone across all ${slides.length} slides…`);
+        for (let i = 0; i < slides.length; i++) { await applyAiActionToIndex(i, action); }
+        say('✓ Rewrote the whole deck for a senior business audience.');
+        return;
+      }
+
       // Content/style transforms → map to AI action, apply to target slide
       const actionMap: Array<[RegExp, AiAction, string]> = [
         [/executive|c-suite|leadership|board/, 'executive_style', 'Executive style'],
@@ -887,24 +976,92 @@ export function VideoGenerationWorkspace() {
       form.append('pdf_file', pdfFile);
       form.append('project_id', String(Number(projectId)));
       form.append('mode', videoMode);
+      form.append('theme_id', themeId);
       form.append('voice_id', voiceId);
       form.append('voice_speed', String(voiceSpeed));
       form.append('avatar_id', selectedAvatar);
+      form.append('presenter_type', presenterType);
       form.append('gen_mode', genMode);
+      addToast('Reading document and generating the presentation…', 'info');
       const response = await fetch(`${FASTAPI_BASE_URL}/video/render/from-pdf`, {
         method: 'POST', credentials: 'include', body: form,
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'PDF render failed');
+      // The AI-understood, fully-narrated slides come back immediately so the
+      // editable script/editor reflects them right away — no need to wait for
+      // the video render job to reload the deck.
+      if (Array.isArray(data.slides) && data.slides.length) {
+        const asSlides: Slide[] = data.slides.map((s: any, i: number) => ({
+          id: `pdf-${i}-${Date.now()}`, title: s.title || `Slide ${i + 1}`,
+          subtitle: s.subtitle || '', content: s.content || '',
+          speaker_notes: s.speaker_notes || '', layout: s.layout || 'content',
+          duration: s.duration || 30,
+        }));
+        setSlides(asSlides);
+        setActiveIdx(0);
+        if (projectId) localStorage.setItem(`slides_${projectId}`, JSON.stringify(asSlides));
+      }
       setJobId(data.job_id);
       setShowGenerateModal(false);
       setTab('render');
-      addToast('PDF render started', 'success');
+      addToast(`PDF understood — ${data.slide_count} slides generated, rendering video…`, 'success');
     } catch (e) {
       setRendering(false);
       addToast(e instanceof Error ? e.message : 'Failed to start render', 'error');
     }
-  }, [projectId, pdfFile, videoMode, voiceId, voiceSpeed, selectedAvatar, genMode, addToast]);
+  }, [projectId, pdfFile, videoMode, themeId, voiceId, voiceSpeed, selectedAvatar, presenterType, genMode, addToast]);
+
+  // ── Import an existing .pptx as editable slides ───────────────────────────
+  const handleImportPptx = useCallback(async (file: File) => {
+    setPptxImporting(true);
+    try {
+      const form = new FormData();
+      form.append('pptx_file', file);
+      const response = await fetch(`${FASTAPI_BASE_URL}/video/import-pptx`, {
+        method: 'POST', credentials: 'include', body: form,
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Import failed');
+      const asSlides: Slide[] = (data.slides || []).map((s: any, i: number) => ({
+        id: `pptx-${i}-${Date.now()}`, title: s.title || `Slide ${i + 1}`,
+        subtitle: s.subtitle || '', content: s.content || '',
+        speaker_notes: s.speaker_notes || '', layout: s.layout || 'content',
+        duration: s.duration || 25,
+      }));
+      setSlides(asSlides);
+      setActiveIdx(0);
+      if (projectId) localStorage.setItem(`slides_${projectId}`, JSON.stringify(asSlides));
+      setShowGenerateModal(false);
+      addToast(`Imported ${asSlides.length} slides from ${file.name} — ready to edit.`, 'success');
+    } catch (e) {
+      addToast(e instanceof Error ? e.message : 'Failed to import .pptx', 'error');
+    } finally {
+      setPptxImporting(false);
+      if (pptxInputRef.current) pptxInputRef.current.value = '';
+    }
+  }, [projectId, setSlides, addToast]);
+
+  // ── Voice live preview ────────────────────────────────────────────────────
+  const previewVoice = useCallback(async () => {
+    setPreviewing(true);
+    try {
+      const res = await fetch(`${FASTAPI_BASE_URL}/video/render/voice-preview`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ voice: { voice_id: voiceId, speed: voiceSpeed, pitch: voicePitch,
+          volume: voiceVolume, emotion: voiceEmotion, style: narrationStyle, pause: voicePause } }),
+      });
+      if (!res.ok) throw new Error('Preview failed');
+      const blob = await res.blob();
+      const audio = new Audio(URL.createObjectURL(blob));
+      audio.onended = () => setPreviewing(false);
+      await audio.play();
+    } catch {
+      addToast('Voice preview unavailable', 'error');
+      setPreviewing(false);
+    }
+  }, [voiceId, voiceSpeed, voicePitch, voiceVolume, voiceEmotion, narrationStyle, voicePause, addToast]);
 
   // ── Start render ──────────────────────────────────────────────────────────
   const startRender = useCallback(async () => {
@@ -919,6 +1076,10 @@ export function VideoGenerationWorkspace() {
           slides: slides.map(s => ({ title: s.title, subtitle: s.subtitle, content: s.content, speaker_notes: s.speaker_notes, layout: s.layout, duration: s.duration })),
           mode: videoMode, theme_id: themeId, voice_id: voiceId, voice_speed: voiceSpeed,
           avatar_id: selectedAvatar, gen_mode: genMode,
+          presenter_type: presenterType, presenter_position: presenterPosition,
+          resolution, fps, captions, camera_motion: cameraMotion,
+          voice: { speed: voiceSpeed, pitch: voicePitch, volume: voiceVolume, emotion: voiceEmotion,
+                   style: narrationStyle, pause: voicePause, emphasis: voiceEmphasis },
         },
       });
       setJobId(res.job_id);
@@ -929,7 +1090,7 @@ export function VideoGenerationWorkspace() {
       setRendering(false);
       addToast(e instanceof Error ? e.message : 'Failed to start render', 'error');
     }
-  }, [projectId, pdfMode, pdfFile, slides, videoMode, themeId, voiceId, voiceSpeed, selectedAvatar, genMode, addToast, startPdfRender]);
+  }, [projectId, pdfMode, pdfFile, slides, videoMode, themeId, voiceId, voiceSpeed, voicePitch, voiceVolume, voiceEmotion, presenterType, presenterPosition, narrationStyle, voicePause, voiceEmphasis, resolution, fps, captions, cameraMotion, selectedAvatar, genMode, addToast, startPdfRender]);
 
   const activeSlide = slides[activeIdx];
   const theme = THEMES[themeId];
@@ -1164,28 +1325,163 @@ export function VideoGenerationWorkspace() {
                   </div>
                   <div>
                     <label className="text-xs text-text-muted mb-2 flex items-center justify-between">
-                      <span>Speed</span><span className="text-ey-yellow">{voiceSpeed.toFixed(1)}x</span>
+                      <span>Speed</span><span className="text-ey-yellow">{voiceSpeed.toFixed(2)}x</span>
                     </label>
-                    <input type="range" min={0.5} max={2.0} step={0.1} value={voiceSpeed}
+                    <input type="range" min={0.5} max={1.5} step={0.05} value={voiceSpeed}
                       onChange={e => setVoiceSpeed(Number(e.target.value))} className="w-full accent-ey-yellow" />
-                    <div className="flex justify-between text-[10px] text-text-muted mt-1"><span>0.5x</span><span>Normal</span><span>2.0x</span></div>
+                    <div className="flex justify-between text-[10px] text-text-muted mt-1"><span>Slower</span><span>Natural</span><span>Faster</span></div>
                   </div>
+                  <div>
+                    <label className="text-xs text-text-muted mb-2 flex items-center justify-between">
+                      <span>Pitch</span><span className="text-ey-yellow">{voicePitch.toFixed(2)}</span>
+                    </label>
+                    <input type="range" min={0.8} max={1.2} step={0.02} value={voicePitch}
+                      onChange={e => setVoicePitch(Number(e.target.value))} className="w-full accent-ey-yellow" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-text-muted mb-2 flex items-center justify-between">
+                      <span>Volume</span><span className="text-ey-yellow">{Math.round(voiceVolume*100)}%</span>
+                    </label>
+                    <input type="range" min={0.3} max={1.5} step={0.05} value={voiceVolume}
+                      onChange={e => setVoiceVolume(Number(e.target.value))} className="w-full accent-ey-yellow" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-text-muted mb-2 block">Emotion / Delivery</label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {(['confident','warm','energetic','calm','authoritative'] as const).map(em => (
+                        <button key={em} onClick={() => setVoiceEmotion(em)}
+                          className={`text-[11px] capitalize rounded-lg border px-2 py-1.5 transition-all ${voiceEmotion===em ? 'border-ey-yellow bg-ey-yellow/10 text-ey-yellow' : 'border-dark-border text-text-muted hover:bg-dark-bg'}`}>
+                          {em}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-text-muted mb-2 block">Narration Style</label>
+                    <select value={narrationStyle} onChange={e => setNarrationStyle(e.target.value as any)}
+                      className="w-full bg-dark-bg border border-dark-border rounded-lg px-2.5 py-2 text-xs text-text-primary focus:outline-none focus:border-ey-yellow/40">
+                      {(['executive','consultant','professional','friendly','technical'] as const).map(s =>
+                        <option key={s} value={s} className="capitalize">{s[0].toUpperCase()+s.slice(1)}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-text-muted mb-2 flex items-center justify-between">
+                      <span>Pause Length</span><span className="text-ey-yellow">{voicePause.toFixed(2)}x</span>
+                    </label>
+                    <input type="range" min={0.6} max={1.6} step={0.05} value={voicePause}
+                      onChange={e => setVoicePause(Number(e.target.value))} className="w-full accent-ey-yellow" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-text-muted mb-2 flex items-center justify-between">
+                      <span>Emphasis</span><span className="text-ey-yellow">{voiceEmphasis.toFixed(2)}x</span>
+                    </label>
+                    <input type="range" min={0.6} max={1.4} step={0.05} value={voiceEmphasis}
+                      onChange={e => setVoiceEmphasis(Number(e.target.value))} className="w-full accent-ey-yellow" />
+                  </div>
+                  <button onClick={previewVoice} disabled={previewing}
+                    className="w-full flex items-center justify-center gap-2 rounded-lg border border-ey-yellow/40 bg-ey-yellow/10 px-3 py-2 text-xs font-medium text-ey-yellow hover:bg-ey-yellow/20 disabled:opacity-50">
+                    {previewing ? <><Loader2 className="h-3.5 w-3.5 animate-spin" />Playing…</> : <><Play className="h-3.5 w-3.5" />Preview Voice</>}
+                  </button>
+                  <p className="text-[10px] text-text-muted">Consultant-style delivery: unhurried pacing with natural pauses and intonation.</p>
                 </div>
               )}
 
               {rightPanel === 'avatar' && (
                 <div className="p-4 space-y-3">
-                  <p className="text-xs text-text-muted font-medium uppercase tracking-wide">Avatar Presenter</p>
-                  <div className="grid grid-cols-2 gap-2">
-                    {AVATARS.map(a => (
-                      <button key={a.id} onClick={() => setSelectedAvatar(a.id)}
-                        className={`flex flex-col items-center gap-1 rounded-lg border p-2 transition-all ${selectedAvatar===a.id ? 'border-ey-yellow bg-ey-yellow/10' : 'border-dark-border hover:border-ey-yellow/30'}`}>
-                        <span className="text-xl">{a.emoji}</span>
-                        <span className={`text-[9px] text-center leading-tight ${selectedAvatar===a.id ? 'text-ey-yellow' : 'text-text-muted'}`}>{a.label}</span>
-                      </button>
-                    ))}
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-text-muted font-medium uppercase tracking-wide">Presenter Type</p>
+                    <button onClick={loadPresenterStatus} title="Re-check availability"
+                      className="text-[10px] text-text-muted hover:text-ey-yellow flex items-center gap-1">
+                      <RefreshCw className="h-3 w-3" />Recheck
+                    </button>
                   </div>
-                  <p className="text-[10px] text-text-muted text-center">SadTalker will use the selected persona</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {([
+                      { id: 'cartoon',    label: 'Cartoon Presenter', emoji: '🧑‍💼', desc: 'Professional explainer' },
+                      { id: 'human',      label: 'Human Avatar',      emoji: '🧑', desc: 'AI lip-sync (SadTalker)' },
+                      { id: 'voice_only', label: 'Voice Only',        emoji: '🎙️', desc: 'Narrated slides' },
+                      { id: 'none',       label: 'No Presenter',      emoji: '🚫', desc: 'Slides + captions' },
+                    ] as const).map(p => {
+                      const st = presenterStatus[p.id] ?? { available: true, message: '' };
+                      return (
+                        <button key={p.id} onClick={() => st.available && setPresenterType(p.id)}
+                          disabled={!st.available} title={st.message}
+                          className={`relative flex flex-col items-center gap-1 rounded-lg border p-2.5 transition-all ${!st.available ? 'opacity-40 cursor-not-allowed border-dark-border' : presenterType===p.id ? 'border-ey-yellow bg-ey-yellow/10' : 'border-dark-border hover:border-ey-yellow/30'}`}>
+                          <span className={`absolute top-1 right-1 h-1.5 w-1.5 rounded-full ${st.available ? 'bg-status-success' : 'bg-status-error'}`} />
+                          <span className="text-xl">{p.emoji}</span>
+                          <span className={`text-[10px] font-medium text-center leading-tight ${presenterType===p.id ? 'text-ey-yellow' : 'text-text-primary'}`}>{p.label}</span>
+                          <span className="text-[8px] text-text-muted text-center leading-tight">{st.available ? p.desc : 'Unavailable'}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {!presenterStatus.human?.available && (
+                    <p className="text-[10px] text-status-warning bg-status-warning/5 border border-status-warning/20 rounded-lg px-2.5 py-2">
+                      {presenterStatus.human?.message || 'Human Avatar unavailable.'}
+                    </p>
+                  )}
+
+                  {(presenterType === 'human' || presenterType === 'cartoon') && (
+                    <>
+                      <p className="text-xs text-text-muted font-medium uppercase tracking-wide pt-2">Persona</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        {AVATARS.map(a => (
+                          <button key={a.id} onClick={() => setSelectedAvatar(a.id)}
+                            className={`flex flex-col items-center gap-1 rounded-lg border p-2 transition-all ${selectedAvatar===a.id ? 'border-ey-yellow bg-ey-yellow/10' : 'border-dark-border hover:border-ey-yellow/30'}`}>
+                            <span className="text-xl">{a.emoji}</span>
+                            <span className={`text-[9px] text-center leading-tight ${selectedAvatar===a.id ? 'text-ey-yellow' : 'text-text-muted'}`}>{a.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[10px] text-text-muted text-center">
+                        {presenterType === 'human' ? 'SadTalker AI lip-sync uses the selected persona' : 'A professional cartoon presenter stands beside your slides'}
+                      </p>
+                      <div>
+                        <label className="text-xs text-text-muted mb-1.5 block">Presenter Position</label>
+                        <div className="flex gap-1.5">
+                          {(['right','left'] as const).map(pos => (
+                            <button key={pos} onClick={() => setPresenterPosition(pos)}
+                              className={`flex-1 text-[11px] capitalize rounded-lg border px-2 py-1.5 ${presenterPosition===pos ? 'border-ey-yellow bg-ey-yellow/10 text-ey-yellow' : 'border-dark-border text-text-muted hover:bg-dark-bg'}`}>
+                              {pos}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Video output controls */}
+                  <div className="pt-2 border-t border-dark-border space-y-3">
+                    <p className="text-xs text-text-muted font-medium uppercase tracking-wide">Video Output</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[10px] text-text-muted mb-1 block">Resolution</label>
+                        <select value={resolution} onChange={e => setResolution(e.target.value as any)}
+                          className="w-full bg-dark-bg border border-dark-border rounded-lg px-2 py-1.5 text-xs">
+                          <option value="720p">720p HD</option>
+                          <option value="1080p">1080p Full HD</option>
+                          <option value="1440p">1440p QHD</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-text-muted mb-1 block">Frame Rate</label>
+                        <select value={fps} onChange={e => setFps(Number(e.target.value))}
+                          className="w-full bg-dark-bg border border-dark-border rounded-lg px-2 py-1.5 text-xs">
+                          <option value={24}>24 fps</option>
+                          <option value={30}>30 fps</option>
+                          <option value={60}>60 fps</option>
+                        </select>
+                      </div>
+                    </div>
+                    <label className="flex items-center justify-between text-xs text-text-secondary">
+                      <span>Burned-in Captions</span>
+                      <input type="checkbox" checked={captions} onChange={e => setCaptions(e.target.checked)} className="accent-ey-yellow h-4 w-4" />
+                    </label>
+                    <label className="flex items-center justify-between text-xs text-text-secondary">
+                      <span>Camera Motion (Ken Burns)</span>
+                      <input type="checkbox" checked={cameraMotion} onChange={e => setCameraMotion(e.target.checked)} className="accent-ey-yellow h-4 w-4" />
+                    </label>
+                  </div>
                 </div>
               )}
             </div>
@@ -1246,7 +1542,9 @@ export function VideoGenerationWorkspace() {
               {renderJob.fallback_used && (
                 <div className="flex items-center gap-3 rounded-xl border border-status-warning/30 bg-status-warning/5 p-4">
                   <AlertTriangle className="h-5 w-5 text-status-warning flex-shrink-0" />
-                  <p className="text-sm text-text-secondary">Avatar model unavailable — automatically using Slides + Voice-over.</p>
+                  <p className="text-sm text-text-secondary">
+                    {renderJob.avatar_error || 'Avatar model unavailable — automatically using Slides + Voice-over.'}
+                  </p>
                 </div>
               )}
 
@@ -1352,6 +1650,23 @@ export function VideoGenerationWorkspace() {
                 ) : (
                   <p className="text-xs text-text-muted">Upload a PDF and the system will extract slides from it, add AI narration, and render a video — no manual slide building needed.</p>
                 )}
+              </div>
+
+              {/* PPTX import option */}
+              <div className="rounded-xl border-2 border-dashed border-dark-border bg-dark-bg p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Presentation className="h-5 w-5 text-ey-yellow" />
+                    <span className="text-sm font-semibold text-text-primary">Import Existing PPTX</span>
+                    <span className="text-xs text-text-muted bg-dark-border px-2 py-0.5 rounded-full">optional</span>
+                  </div>
+                  <label className="relative cursor-pointer">
+                    <input ref={pptxInputRef} type="file" accept=".pptx" className="sr-only"
+                      onChange={e => { const f = e.target.files?.[0] || null; if (f) handleImportPptx(f); }} />
+                    <span className="btn-secondary text-xs px-3 py-1.5">{pptxImporting ? 'Importing…' : 'Browse PPTX'}</span>
+                  </label>
+                </div>
+                <p className="text-xs text-text-muted">Already have a deck? Upload a .pptx and its slides, notes and content load straight into the editor here so you can keep editing and render a video from it.</p>
               </div>
 
               {/* Gen mode */}
