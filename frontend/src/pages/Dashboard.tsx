@@ -30,6 +30,7 @@ import {
 import { Card, StatusBadge } from '../components/ui/Card';
 import { apiRequest, buildApiUrl } from '../lib/api';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
+import { getSelectedProjectId as getSavedProjectId, setSelectedProjectId as persistSelectedProjectId } from '../lib/projectContext';
 import type { DashboardSummary, AgentRun, Artifact } from '../types/unified';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -49,6 +50,35 @@ function formatDuration(start: string | null, end: string | null): string | null
 function formatTimestamp(ts: string | null): string {
   if (!ts) return '—';
   return new Date(ts).toLocaleString();
+}
+
+// Backend stores the raw exception text in output_url as {"error": "..."} on
+// failure (e.g. "All local models failed (qwen3:14b, gemma2:9b, ...). Last
+// error: HTTPConnectionPool...") — useful in logs, not something to show an
+// end user. Map known technical patterns to a plain-language summary; fall
+// back to a generic message rather than ever displaying raw provider/model
+// internals or stack-trace-shaped text.
+function friendlyErrorMessage(outputUrl: string | null): string {
+  let raw = '';
+  try {
+    raw = outputUrl ? (JSON.parse(outputUrl).error ?? '') : '';
+  } catch {
+    raw = outputUrl ?? '';
+  }
+  const lower = raw.toLowerCase();
+  if (lower.includes('rate limit') || lower.includes('429')) {
+    return 'AI provider rate limit reached — please retry in a few minutes.';
+  }
+  if (lower.includes('all local models failed') || lower.includes('connection refused') || lower.includes('httpconnectionpool')) {
+    return 'AI provider temporarily unavailable — please retry.';
+  }
+  if (lower.includes('validation error') || lower.includes('json')) {
+    return 'Generated content did not pass quality checks — please retry.';
+  }
+  if (lower.includes('empty') && (lower.includes('artifact') || lower.includes('plan') || lower.includes('context'))) {
+    return 'Not enough context to generate this step — check prior artifacts and retry.';
+  }
+  return 'This step failed unexpectedly — please retry.';
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -90,9 +120,9 @@ const AgentRunRow = memo(function AgentRunRow({ run }: { run: AgentRun }) {
           <p className="text-xs font-medium text-text-primary truncate">
             {run.agent_name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}
           </p>
-          {run.status === 'failed' && run.error_message && (
+          {run.status === 'failed' && (
             <p className="text-[10px] text-status-error truncate">
-              {run.error_message}
+              {friendlyErrorMessage(run.output_url)}
             </p>
           )}
         </div>
@@ -146,11 +176,10 @@ export function Dashboard() {
     const statePid = location.state?.projectId;
     if (statePid) {
       const str = typeof statePid === 'number' ? String(statePid) : statePid;
-      localStorage.setItem('selectedProjectId', str);
+      persistSelectedProjectId(str);
       return str;
     }
-    const saved = localStorage.getItem('selectedProjectId');
-    return saved || null;
+    return getSavedProjectId();
   });
 
   const [loading, setLoading] = useState(true);
@@ -175,7 +204,7 @@ export function Dashboard() {
       const projsList = Array.isArray(projsRaw) ? projsRaw : ((projsRaw as any)?.projects || []);
       setProjects(projsList);
 
-      const savedPid = localStorage.getItem('selectedProjectId');
+      const savedPid = getSavedProjectId();
       const candidatePid = savedPid ?? (projsList.length ? projsList[0].id : null);
       const validPid = projsList.some((p: any) => String(p.id) === String(candidatePid))
         ? String(candidatePid)
@@ -183,7 +212,7 @@ export function Dashboard() {
 
       if (validPid) {
         setSelectedProjectId(validPid);
-        localStorage.setItem('selectedProjectId', validPid);
+        persistSelectedProjectId(validPid);
       }
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : 'Dashboard data could not be loaded');
@@ -213,7 +242,7 @@ export function Dashboard() {
 
   const selectProject = useCallback(async (pid: string) => {
     setSelectedProjectId(pid);
-    localStorage.setItem('selectedProjectId', pid);
+    persistSelectedProjectId(pid);
   }, []);
 
   const handleDownloadAll = useCallback(async () => {

@@ -18,6 +18,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cryptography.fernet import Fernet
+from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import (
     Boolean,
@@ -35,22 +37,29 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, rela
 # ---------------------------------------------------------------------------
 # Database engine / session
 # ---------------------------------------------------------------------------
-def _load_env_file(path: Path) -> None:
-    if not path.exists():
-        return
-    for raw_line in path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+# main.py (the app's entry point) already calls load_dotenv() on backend/.env
+# before importing this module — this call is a no-op then (load_dotenv
+# doesn't override already-set vars). It exists so models.py still resolves
+# the right config when imported standalone (Alembic, one-off scripts, tests)
+# without going through main.py first. Single source of truth: backend/.env
+# — there used to be a second, hand-rolled loader here that also checked a
+# package-local fastapi_agents/.env, which had gone stale (still said
+# DEMO_MODE=true) and could silently win depending on import order. Removed;
+# don't recreate a second .env file alongside this one.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
+# Centralized so every module reads the same value the same way — these used
+# to be independently redefined in main.py, ai_service.py, agents/llm_service.py,
+# and main_extension.py, which is how a stale/missing env var could make one
+# module disagree with another (see PROVIDER_KEY_ENCRYPTION_KEY note below).
+DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 
-for env_path in (
-    Path(__file__).resolve().parent / ".env",
-    Path(__file__).resolve().parents[1] / ".env",
-):
-    _load_env_file(env_path)
+# No fixed literal fallback on purpose — a hardcoded default secret baked
+# into source is readable by anyone with the code. If unset, generate a
+# random ephemeral one so the server still starts, but every restart
+# invalidates existing sessions/encrypted BYOK rows rather than silently
+# using one fixed, guessable value across every deployment of this codebase.
+PROVIDER_KEY_ENCRYPTION_KEY = os.getenv("PROVIDER_KEY_ENCRYPTION_KEY") or Fernet.generate_key().decode()
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -191,9 +200,14 @@ class ProviderName(str, enum.Enum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
     GEMINI = "gemini"
+    GROQ = "groq"
     AZURE_OPENAI = "azure_openai"
     AWS_BEDROCK = "aws_bedrock"
     OLLAMA = "ollama"
+    D_ID = "d_id"  # avatar video credential, not an LLM — see agents/avatar_provider.py
+    OPENAI_IMAGE = "openai_image"  # image credential, not an LLM — see agents/image_provider.py
+    GOOGLE_IMAGEN = "google_imagen"
+    STABILITY = "stability"
 
 
 class ArtifactType(str, enum.Enum):
@@ -353,8 +367,35 @@ class ProviderConfiguration(Base):
     provider_name: Mapped[str] = mapped_column(String(20), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     encrypted_key: Mapped[str | None] = mapped_column(Text, nullable=True)  # Fernet ciphertext, never raw
+    # Needed for azure_openai / openai_compatible BYOK (a flat api_key alone
+    # isn't enough to call those); NULL for providers that don't need them.
+    base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    api_version: Mapped[str | None] = mapped_column(String(50), nullable=True)  # azure_openai only
 
     project: Mapped["Project"] = relationship(back_populates="provider_configurations")
+
+
+def _ensure_provider_configuration_columns(engine) -> None:
+    """Additive, idempotent column migration for provider_configurations.
+    Base.metadata.create_all() only creates missing TABLES, not missing
+    COLUMNS on a table that already exists — this repo has no alembic, so
+    any future additive schema change should follow this same pattern
+    (mirrors the MCPIntegration lazy-table precedent in main_extension.py)."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "provider_configurations" not in insp.get_table_names():
+        return  # create_all() will create the whole table, columns included
+    existing = {c["name"] for c in insp.get_columns("provider_configurations")}
+    with engine.begin() as conn:
+        for col, ddl_type in (
+            ("base_url", "VARCHAR(500)"),
+            ("model", "VARCHAR(200)"),
+            ("api_version", "VARCHAR(50)"),
+        ):
+            if col not in existing:
+                conn.execute(text(f"ALTER TABLE provider_configurations ADD COLUMN {col} {ddl_type}"))
 
 
 class GeneratedArtifact(Base):

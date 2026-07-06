@@ -26,11 +26,14 @@ NARRATIVE ARC — plan the deck to tell a complete consulting story, in this ord
 LAYOUT VOCABULARY — choose the single best layout per slide from:
   title · section · agenda · items · kpi_cards · stats_grid · table · chart ·
   two_col · comparison · tech_grid · process · architecture · roadmap ·
-  timeline · quote · closing
+  timeline · quote · closing · hero
 Rules of thumb: use `comparison` for before/after or option analysis; `process`
 for step flows; `architecture` for layered system design; `kpi_cards`/`stats_grid`
 for metrics; `table` for structured detail; `chart` for quantitative comparison;
-`roadmap`/`timeline` for phasing; `items` for capability lists. Prefer visual
+`roadmap`/`timeline` for phasing; `items` for capability lists; `hero` for a
+single full-bleed, image-led statement slide at a major narrative turn (e.g.
+"Why This Solution", "Future Scope", or a bold claim) — use it sparingly, once
+or twice per deck at most, never for routine content slides. Prefer visual
 layouts (cards, diagrams, KPIs) over dense bullet slides. Never plan a slide that
 is just a wall of text.
 
@@ -54,7 +57,7 @@ Return ONLY valid JSON (no markdown fences, no preamble) matching EXACTLY this s
     {
       "slide_number": 1,
       "title": "string",
-      "slide_type": "title|section|agenda|items|kpi_cards|stats_grid|table|chart|two_col|comparison|tech_grid|process|architecture|roadmap|timeline|quote|closing",
+      "slide_type": "title|section|agenda|items|kpi_cards|stats_grid|table|chart|two_col|comparison|tech_grid|process|architecture|roadmap|timeline|quote|closing|hero",
       "key_points": ["the concrete points this slide must convey, from artifacts"],
       "visual_description": "what the slide looks like",
       "diagram": "none|architecture|workflow|dataflow|sequence|deployment",

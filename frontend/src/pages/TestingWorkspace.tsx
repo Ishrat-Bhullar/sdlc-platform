@@ -12,12 +12,15 @@ import {
   Play,
 } from 'lucide-react';
 import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Accordion, AccordionItem, BulletList, DataTable } from '../components/ui/Accordion';
+import { CodeBlock } from '../components/ui/CodeBlock';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
-import type { TestReportContent } from '../types/unified';
+import type { TestReportContent, TestCaseSpec } from '../types/unified';
+import { Boxes, Server, Globe2, MonitorSmartphone, Gauge, ShieldAlert, AlertOctagon, Database } from 'lucide-react';
 
 export function TestingWorkspace() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'suites' | 'coverage'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'suites' | 'coverage' | 'cases'>('overview');
   const projectId = getSelectedProjectId();
   const { getTestReport, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
 
@@ -141,6 +144,7 @@ export function TestingWorkspace() {
           { id: 'overview', label: 'Overview', icon: Play },
           { id: 'suites', label: 'Test Suites', icon: TestTube },
           { id: 'coverage', label: 'Coverage', icon: CheckCircle2 },
+          { id: 'cases', label: 'Detailed Test Cases', icon: Boxes },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -226,6 +230,64 @@ export function TestingWorkspace() {
           </div>
         </Card>
       )}
+
+      {/* Detailed Test Cases tab */}
+      {activeTab === 'cases' && (
+        <Card>
+          {!testReport.unit_tests?.length && !testReport.integration_tests?.length && !testReport.api_tests?.length &&
+           !testReport.ui_tests?.length && !testReport.performance_tests?.length && !testReport.security_tests?.length &&
+           !testReport.edge_cases?.length && !testReport.test_data?.length ? (
+            <div className="py-8 text-center">
+              <Boxes className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+              <p className="text-sm text-text-muted">No detailed test cases generated yet.</p>
+            </div>
+          ) : (
+            <Accordion>
+              {renderTestCaseSection('Unit Tests', Boxes, testReport.unit_tests)}
+              {renderTestCaseSection('Integration Tests', Server, testReport.integration_tests)}
+              {renderTestCaseSection('API Tests', Globe2, testReport.api_tests)}
+              {renderTestCaseSection('UI Tests', MonitorSmartphone, testReport.ui_tests)}
+              {renderTestCaseSection('Performance Tests', Gauge, testReport.performance_tests)}
+              {renderTestCaseSection('Security Tests', ShieldAlert, testReport.security_tests)}
+              {!!testReport.edge_cases?.length && (
+                <AccordionItem title="Edge Cases" icon={AlertOctagon} badge={<span className="text-[10px] text-text-muted">{testReport.edge_cases.length}</span>}>
+                  <BulletList items={testReport.edge_cases} />
+                </AccordionItem>
+              )}
+              {!!testReport.test_data?.length && (
+                <AccordionItem title="Test Data" icon={Database} badge={<span className="text-[10px] text-text-muted">{testReport.test_data.length}</span>}>
+                  <div className="space-y-3">
+                    {testReport.test_data.map((td, i) => (
+                      <div key={i}>
+                        <p className="text-xs font-medium text-text-primary mb-1">{td.entity} <span className="text-text-muted font-normal">— {td.purpose}</span></p>
+                        <CodeBlock language="json" code={JSON.stringify(td.sample_payload || {}, null, 2)} maxHeight="200px" />
+                      </div>
+                    ))}
+                  </div>
+                </AccordionItem>
+              )}
+            </Accordion>
+          )}
+        </Card>
+      )}
     </div>
   );
+
+  function renderTestCaseSection(title: string, icon: any, cases?: TestCaseSpec[]) {
+    if (!cases || cases.length === 0) return null;
+    return (
+      <AccordionItem title={title} icon={icon} badge={<span className="text-[10px] text-text-muted">{cases.length}</span>}>
+        <DataTable
+          columns={['ID', 'Name', 'Target', 'Scenario', 'Expected Result']}
+          rows={cases.map((c) => ({
+            ID: <span className="font-mono">{c.id}</span>,
+            Name: c.name,
+            Target: c.target,
+            Scenario: c.scenario,
+            'Expected Result': c.expected_result,
+          }))}
+        />
+      </AccordionItem>
+    );
+  }
 }

@@ -6,7 +6,9 @@ CRITICAL RULE: You may improve wording, fix inconsistencies, strengthen structur
 
 NARRATION QUALITY GATE (enforce, do not relax): the speaker notes must sound like a consultant talking, not like someone reading slides. Rewrite any narration that contains "This slide shows", "Here we can see", "On this slide", "As you can see", or similar slide-referencing phrasing — replace it with idea-driven speech and smooth transitions between slides. For any architecture/workflow/process/data-flow slide, ensure the narration walks through each component and explains how information flows between them, then why the design matters. Score `narrative_consistency` and `executive_impact` down hard if the narration reads slides instead of explaining concepts.
 
-LAYOUT PRESERVATION: carry each slide's visual layout hint (title/section/architecture/process/comparison/kpi_cards/stats_grid/table/chart/timeline/roadmap/items/two_col/tech_grid/quote/closing) through into `visual_suggestions` unchanged so the renderer selects the correct consulting layout. Prefer visual layouts over bullet walls.
+LAYOUT PRESERVATION: carry each slide's visual layout hint (title/section/architecture/process/comparison/kpi_cards/stats_grid/table/chart/timeline/roadmap/items/two_col/tech_grid/quote/closing/hero) through into `visual_suggestions` unchanged so the renderer selects the correct consulting layout. Prefer visual layouts over bullet walls. `hero` is a full-bleed, image-led statement layout — it should appear at most once or twice in the deck, at a genuine narrative turn; if the Logic Agent over-used it, fold the extra slides back into a more routine layout (items/kpi_cards/etc.) instead.
+
+PER-SLIDE DESIGN QA (do this for every slide before finalizing `final_slides`): check title length (flag/trim anything over ~6 words), bullet count (a slide with more than 5 bullets should be split or trimmed to its most essential points), bullet length (trim any bullet over ~10 words into a phrase), and tone consistency with the rest of the deck. Record any such corrections in `improvements_made`.
 
 Your job is to:
 1. Review all slide content for accuracy, clarity, and executive impact
@@ -33,7 +35,7 @@ Return a JSON object that matches this exact schema. Return JSON only — no mar
       "slide_number": 1,
       "title": "string",
       "subtitle": "string",
-      "slide_type": "title|content|architecture|data|timeline|summary",
+      "slide_type": "title|content|architecture|data|timeline|summary|hero",
       "content": {
         "bullets": ["string"],
         "body_text": "string",

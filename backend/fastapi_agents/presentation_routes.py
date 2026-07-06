@@ -66,53 +66,102 @@ router = APIRouter(tags=["presentation"])
 # PDF -> Presentation understanding pipeline (used by /video/render/from-pdf)
 # ---------------------------------------------------------------------------
 
-def _extract_pdf_text(pdf_path: str) -> tuple[str, int]:
-    """Extract full document text (all pages, joined) + page count. Tries
-    pdfplumber first, falls back to PyPDF2 — mirrors the platform's existing
-    ingestion path so behaviour is consistent."""
+def _extract_pdf_text(pdf_path: str) -> tuple[str, int, list[str]]:
+    """Extract full document text (all pages, joined) + page count + the
+    per-page text list (needed so the deck can map one slide per PDF page).
+    Tries pdfplumber first, falls back to PyPDF2 — mirrors the platform's
+    existing ingestion path so behaviour is consistent."""
     try:
         import pdfplumber
         with pdfplumber.open(pdf_path) as pdf:
             pages = [(p.extract_text() or "").strip() for p in pdf.pages]
-            return "\n\n".join(pages), len(pdf.pages)
+            return "\n\n".join(pages), len(pdf.pages), pages
     except ImportError:
         pass
     import PyPDF2
     reader = PyPDF2.PdfReader(pdf_path)
     pages = [(p.extract_text() or "").strip() for p in reader.pages]
-    return "\n\n".join(pages), len(reader.pages)
+    return "\n\n".join(pages), len(reader.pages), pages
 
 
 _DIAGRAM_KEYWORDS = ("architecture", "workflow", "pipeline", "data flow", "process flow",
                     "sequence", "deployment", "system design", "component diagram")
 
 
-def _understand_document_to_slides(full_text: str, project_name: str, page_count: int) -> list[dict]:
-    """Turn a full document into a consulting-quality, narrated slide deck.
+def _pages_to_slides(pages: list[str], project_name: str, doc_title: str) -> list[dict]:
+    """One slide per PDF page, in page order — so a 20-page PDF always
+    produces exactly 20 slides, letting the user pick a precise page range
+    (e.g. "just pages 2-4") in the workspace afterward. Each page's own
+    heading (if any) becomes the slide title; its text becomes bullets +
+    full narration."""
+    slides: list[dict] = []
+    for i, page_text in enumerate(pages):
+        lines = [l.strip() for l in page_text.splitlines() if l.strip()]
+        title = None
+        for line in lines[:6]:  # a heading usually appears near the top of the page
+            if _looks_like_heading(line):
+                title = line.rstrip(":")
+                break
+        if not title:
+            title = doc_title if i == 0 else f"Page {i + 1}"
 
-    Single bounded LLM call (small/fast 'planning' model, hard timeout) asks
-    for a structured outline with real narration in one shot — deliberately
-    ONE call, not one-per-slide, to stay inside the timeout budget while
-    still producing detailed speaker notes per slide. On any failure
-    (timeout, unreachable Ollama, bad JSON) falls back to a deterministic,
-    section-based builder that runs instantly and never blocks the request.
-    Diagrams are then auto-attached to any slide whose content describes an
-    architecture/workflow/process, via the native renderer (always succeeds).
+        body_lines = [l for l in lines if l != title]
+        bullets = _sentences_as_bullets(" ".join(body_lines))
+        narration = " ".join(body_lines)[:900] or f"This page covers {title}."
+        layout = "title" if i == 0 else ("closing" if i == len(pages) - 1 else "items")
+
+        slides.append({
+            "title": title[:90],
+            "subtitle": f"Page {i + 1} of {len(pages)}" if i == 0 else "",
+            "layout": layout,
+            "content": "\n".join(f"• {b}" for b in bullets) if layout != "title" else "",
+            "items": [{"icon": "check", "title": b, "body": ""} for b in bullets],
+            "speaker_notes": narration,
+            "duration": 28,
+        })
+    return slides
+
+
+def _understand_document_to_slides(
+    full_text: str, project_name: str, page_count: int, pages: list[str] | None = None,
+    *, db=None, project_id: int | None = None,
+) -> list[dict]:
+    """Turn a full document into a narrated slide deck — one slide per PDF
+    page (see _pages_to_slides) so the slide count always matches the
+    document's page count, letting the user pick a precise page range for
+    video generation afterward. Diagrams are auto-attached to any slide
+    whose content describes an architecture/workflow/process, via the
+    native renderer (always succeeds).
     """
-    # The LLM path truncates its input to stay inside a small model's context
-    # budget (see _llm_document_to_slides), which silently drops entire
-    # sections from the middle of any document longer than that budget. The
-    # deterministic path processes the WHOLE document regardless of length,
-    # so for long documents (e.g. a 20-page consulting proposal) it's the
-    # more complete result — skip the LLM call entirely rather than feed it
-    # a truncated document and get a worse, incomplete summary.
+    if pages:
+        doc_title = project_name
+        first_lines = [l.strip() for l in pages[0].splitlines() if l.strip()]
+        if first_lines:
+            first = first_lines[0].rstrip(":")
+            if 8 < len(first) < 140 and not first.endswith("."):
+                doc_title = first
+        slides = _pages_to_slides(pages, project_name, doc_title)
+        return [_attach_diagram_if_relevant(s) for s in slides]
+
+    # Fallback for any caller that only has the joined full_text (no page
+    # boundaries) — keeps this function usable in that older shape too.
+    # The LLM path truncates its input to stay inside the ACTIVE backend's
+    # context budget (see _llm_document_to_slides) — that budget is only
+    # tight when Ollama ends up serving the call; a cloud GPT model's
+    # context window comfortably fits much longer documents, so the
+    # LLM-path length gate below is widened whenever a cloud provider is
+    # configured for this project.
+    from .agents.llm_service import LLMService as _LLMService
+    _has_cloud = _LLMService(db=db, project_id=project_id).has_cloud_path()
+    _llm_gate = 60000 if _has_cloud else 12000
+
     slides = None
-    if len(full_text.strip()) <= 12000:
-        slides = _llm_document_to_slides(full_text, project_name)
+    if len(full_text.strip()) <= _llm_gate:
+        slides = _llm_document_to_slides(full_text, project_name, db=db, project_id=project_id)
     if not slides:
         logger.info(
             "[PDFPipeline] Using deterministic section builder (%s)",
-            "document too large for a single LLM call" if len(full_text.strip()) > 12000
+            "document too large for a single LLM call" if len(full_text.strip()) > _llm_gate
             else "LLM understanding unavailable/failed",
         )
         slides = _deterministic_document_to_slides(full_text, project_name, page_count)
@@ -120,8 +169,11 @@ def _understand_document_to_slides(full_text: str, project_name: str, page_count
     return [_attach_diagram_if_relevant(s) for s in slides]
 
 
-def _llm_document_to_slides(full_text: str, project_name: str) -> list[dict] | None:
-    from .agents.llm_client import OllamaClient, LLMConnectionError
+def _llm_document_to_slides(
+    full_text: str, project_name: str, *, db=None, project_id: int | None = None,
+) -> list[dict] | None:
+    from .agents.llm_service import LLMService
+    from .agents.llm_client import LLMConnectionError
     import json as _json
 
     system = (
@@ -141,16 +193,21 @@ def _llm_document_to_slides(full_text: str, project_name: str) -> list[dict] | N
         "technology, benefits, ROI and conclusion across the deck as a whole.\n"
         "No markdown fences, no preamble — JSON array only."
     )
-    # Cap input so the call stays fast on small local models; the opening and
-    # closing of a document usually carry the executive summary / conclusion.
+
+    llm = LLMService(db=db, project_id=project_id, role="planning")
+    cloud = llm.has_cloud_path()
+    llm.timeout = 170 if cloud else 55
+
+    # Cap input so the call stays fast on the Ollama fallback's local model;
+    # a cloud GPT model's context window comfortably fits the full document,
+    # so this cap only applies when Ollama will actually serve the call.
     doc = full_text.strip()
-    if len(doc) > 9000:
+    if not cloud and len(doc) > 9000:
         doc = doc[:6000] + "\n\n...[middle omitted]...\n\n" + doc[-2500:]
     user_prompt = f"Document title/context: {project_name}\n\nDOCUMENT TEXT:\n{doc}"
 
     try:
-        client = OllamaClient(role="planning", timeout=55)
-        raw = client.generate(system=system, prompt=user_prompt, temperature=0.3)
+        raw = llm.generate_text(system, user_prompt, temperature=0.3)
         try:
             data = _json.loads(raw)
         except _json.JSONDecodeError:
@@ -279,6 +336,17 @@ def _deterministic_document_to_slides(full_text: str, project_name: str, page_co
     available the user gets a complete, navigable, multi-slide deck — never
     a single wall-of-text slide."""
     all_lines = [l.strip() for l in full_text.splitlines() if l.strip()]
+
+    # PDF is the single source of truth for the title, not whatever project
+    # this happens to be attached to — the document's own opening line (a
+    # cover-page caption or title, e.g. "AI-Powered Knowledge Companion for
+    # Panchayati Raj") is almost always more accurate than project_name.
+    doc_title = project_name
+    if all_lines:
+        first = all_lines[0].rstrip(":")
+        if 8 < len(first) < 140 and not first.endswith("."):
+            doc_title = first
+
     sections: list[tuple[str, list[str]]] = []
     current_title, current_lines = project_name, []
     for line in all_lines:
@@ -290,10 +358,10 @@ def _deterministic_document_to_slides(full_text: str, project_name: str, page_co
     if current_lines:
         sections.append((current_title, current_lines))
     # First "section" is often just the document title line repeated as both
-    # the title and sole content — drop it if it duplicates project_name.
+    # the title and sole content — drop it if it duplicates the extracted title.
     if sections and sections[0][0] == project_name and len(sections) > 1:
         lead_text = " ".join(sections[0][1]).strip()
-        if len(lead_text) < 20:
+        if len(lead_text) < 20 or lead_text == doc_title:
             sections = sections[1:]
     if not sections:
         sections = [(project_name, [full_text[:800]])]
@@ -302,9 +370,9 @@ def _deterministic_document_to_slides(full_text: str, project_name: str, page_co
         logger.info("[PDFPipeline] Document has %d sections — keeping first 18", len(sections))
     sections = sections[:18]
     slides = [{
-        "title": project_name, "subtitle": f"{page_count}-page document — automated summary",
+        "title": doc_title, "subtitle": f"{page_count}-page document — automated summary",
         "layout": "title", "content": "", "items": [],
-        "speaker_notes": f"Good morning. What follows is a structured walkthrough of {project_name}, "
+        "speaker_notes": f"Good morning. What follows is a structured walkthrough of {doc_title}, "
                         f"covering the problem, the proposed approach, and the value it delivers.",
         "duration": 30,
     }]
@@ -398,35 +466,9 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
     # Helper: resolve AI provider for the project
     # -----------------------------------------------------------------------
 
-    def _get_project_provider(db: Session, project_id: int) -> tuple[str | None, str | None]:
-        """Return (provider_name, raw_api_key) for the project's active provider."""
-        try:
-            ProviderConfiguration = models.get("ProviderConfiguration")
-            if not ProviderConfiguration:
-                return None, None
-
-            from cryptography.fernet import Fernet
-            import os
-
-            enc_key = os.getenv("PROVIDER_KEY_ENCRYPTION_KEY", "wSqu6lOQVJ2WhQddQB-TNdPSBQVmeLVC7AQ-9hszUDY=")
-            f = Fernet(enc_key.encode())
-
-            configs = (
-                db.query(ProviderConfiguration)
-                .filter(
-                    ProviderConfiguration.project_id == project_id,
-                    ProviderConfiguration.enabled == True,
-                )
-                .all()
-            )
-            for cfg in configs:
-                if cfg.encrypted_key:
-                    raw = f.decrypt(cfg.encrypted_key.encode()).decode()
-                    if raw and "demo-placeholder" not in raw:
-                        return cfg.provider_name, raw
-        except Exception as exc:
-            logger.warning("[PresentationRoutes] Provider resolution failed: %s", exc)
-        return None, None
+    # Provider resolution (BYOK -> deployment default -> Ollama) now lives
+    # entirely in LLMService — construct one with db/project_id wherever an
+    # LLM call is needed instead of resolving provider/api_key by hand here.
 
     # -----------------------------------------------------------------------
     # In-memory fallback store for Media Studio editor state + last-used
@@ -494,10 +536,8 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
                 "No artifacts found for this project. Run the pipeline first.",
             )
 
-        provider, api_key = _get_project_provider(db, payload.project_id)
-
         try:
-            agent = PresentationVideoAgent(provider=provider, api_key=api_key)
+            agent = PresentationVideoAgent(db=db, project_id=payload.project_id)
             result = agent.run(
                 artifacts_context=artifacts_context,
                 presentation_tone=payload.presentation_tone,
@@ -506,6 +546,7 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
                 avatar_config=payload.avatar_config.model_dump(),
                 scene_config=payload.scene_config.model_dump(),
                 language=payload.language,
+                theme_id=payload.theme_id,
             )
         except Exception as exc:
             logger.error("[PresentationRoutes] Agent failed: %s", exc, exc_info=True)
@@ -779,12 +820,11 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
         return None
 
     async def _text_ai_action(db: Session, project_id: int, action_type: str, context: dict) -> dict:
-        """Beautify / Rewrite / Translate a slide's text content via the project's
-        configured LLM provider, reusing PresentationVideoAgent's client setup."""
-        from .agents.llm_client import OllamaClient
+        """Beautify / Rewrite / Translate a slide's text content via the
+        platform's central LLMService (BYOK -> deployment default -> Ollama)."""
+        from .agents.llm_service import LLMService
 
-        provider, api_key = _get_project_provider(db, project_id)
-        client = OllamaClient(provider=provider, api_key=api_key) if provider else OllamaClient()
+        llm = LLMService(db=db, project_id=project_id, role="review", timeout=60)
 
         text = context.get("content") or context.get("text") or ""
         if not text.strip():
@@ -798,11 +838,10 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
         instruction = instructions.get(action_type, "Improve this content while preserving meaning.")
 
         try:
-            response = client.complete(
+            new_text = llm.generate_text(
                 system="You edit presentation slide text. Return only the edited text, no preamble.",
                 prompt=f"{instruction}\n\nCONTENT:\n{text}",
             )
-            new_text = response if isinstance(response, str) else getattr(response, "text", str(response))
         except Exception as exc:
             logger.warning("[AiAction] Text transform failed (%s): %s", action_type, exc)
             new_text = text  # fail safe: return original content unchanged
@@ -1263,11 +1302,32 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
         safe_name = "".join(c if c.isalnum() or c in "- _" else "_" for c in project_name)
         suffix = "avatar" if artifact.artifact_type == _artifact_type_value("PRESENTATION_AVATAR_VIDEO", "presentation_avatar_video") else "narrated"
 
-        import base64
+        # Two producers write this same artifact_type with different content
+        # shapes: the older VideoGenerationPipeline path (POST
+        # /presentation/video/generate) stores the full video as base64 text;
+        # the local job-based pipeline (POST /video/render, video_pipeline_
+        # local.py's _save_video_artifacts) stores a small JSON blob pointing
+        # at the real file on disk (video_path) instead. Detect which one
+        # this is rather than assuming — feeding the JSON blob to
+        # base64.b64decode() doesn't raise (base64 decoding is lenient), it
+        # silently returns a handful of garbage bytes.
         try:
-            video_bytes = base64.b64decode(artifact.content)
-        except Exception as exc:
-            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Failed to decode video artifact: {exc}")
+            meta = json.loads(artifact.content)
+            video_path = meta.get("video_path")
+        except (json.JSONDecodeError, TypeError):
+            video_path = None
+
+        if video_path:
+            path = Path(video_path)
+            if not path.exists():
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Video file not found on disk")
+            video_bytes = path.read_bytes()
+        else:
+            import base64
+            try:
+                video_bytes = base64.b64decode(artifact.content)
+            except Exception as exc:
+                raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Failed to decode video artifact: {exc}")
 
         return StreamingResponse(
             BytesIO(video_bytes),
@@ -1420,6 +1480,7 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
             fps=int(payload.get("fps", 30)),
             captions=bool(payload.get("captions", False)),
             motion=bool(payload.get("motion", payload.get("camera_motion", True))),
+            generate_subtitle_files=bool(payload.get("generate_subtitle_files", False)),
         )
         _executor.submit(run_pipeline, job, get_db_fn, _save_video_artifacts)
 
@@ -1465,8 +1526,28 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
             "eta_seconds": job.eta_seconds,
             "fallback_used": job.fallback_used,
             "avatar_error": job.avatar_error,
+            "avatar_provider_used": job.avatar_provider_used,
+            "subtitles_available": bool(job.srt_path and job.vtt_path),
             "error": job.error,
         }
+
+    @app_router.get("/video/render/subtitles/{job_id}.{ext}", summary="Download generated subtitle file (srt or vtt)")
+    def download_render_subtitles(
+        job_id: str,
+        ext: str,
+        current_user=Depends(get_current_user_fn),
+    ):
+        job = get_job(job_id)
+        if not job:
+            raise HTTPException(404, f"Job {job_id} not found")
+        path_str = job.srt_path if ext == "srt" else job.vtt_path if ext == "vtt" else None
+        if not path_str:
+            raise HTTPException(404, f"No .{ext} subtitle file available for this job")
+        path = Path(path_str)
+        if not path.exists():
+            raise HTTPException(404, "Subtitle file no longer exists")
+        media_type = "application/x-subrip" if ext == "srt" else "text/vtt"
+        return FileResponse(path, media_type=media_type, filename=path.name)
 
     @app_router.get("/video/render/play/{artifact_id}", summary="Stream presentation MP4 inline with Range support")
     async def play_video_inline(
@@ -1675,6 +1756,56 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
             "fallback_chain": (os.getenv("OLLAMA_MODEL_FALLBACKS") or "").split(",") if os.getenv("OLLAMA_MODEL_FALLBACKS") else [],
         }
 
+    # ── Platform-default cloud LLM status (Settings → AI Provider) ────────────
+    # Read-only, deployment-wide, no secrets: shows whether the
+    # DEFAULT_AZURE_OPENAI_* / DEFAULT_OPENAI_* env vars are configured,
+    # without ever exposing the key itself. These are the "two places" the
+    # senior engineer configures — Azure is tried first, GPT (OpenAI) second,
+    # Ollama only if neither is set. The frontend just displays what's active.
+    @app_router.get("/settings/ai-config", summary="Deployment-wide default LLM status (no secrets)")
+    def get_ai_config(current_user=Depends(get_current_user_fn)):
+        from .agents.llm_service import default_azure_config_from_env, default_openai_config_from_env
+        from .agents.llm_client import OllamaClient
+
+        azure_cfg = default_azure_config_from_env()
+        openai_cfg = default_openai_config_from_env()
+        ollama_reachable = False
+        try:
+            ollama_reachable = bool(OllamaClient()._list_installed())
+        except Exception:
+            ollama_reachable = False
+
+        return {
+            "azure_configured": azure_cfg is not None,
+            "azure_model": azure_cfg.model if azure_cfg else None,
+            "azure_endpoint": azure_cfg.base_url if azure_cfg else None,
+            "openai_configured": openai_cfg is not None,
+            "openai_model": openai_cfg.model if openai_cfg else None,
+            # Back-compat fields for any older caller: reflects whichever
+            # default would actually win right now (Azure first, then GPT).
+            "default_configured": azure_cfg is not None or openai_cfg is not None,
+            "default_provider": (azure_cfg or openai_cfg).provider if (azure_cfg or openai_cfg) else None,
+            "default_model": (azure_cfg or openai_cfg).model if (azure_cfg or openai_cfg) else None,
+            "default_base_url": (azure_cfg or openai_cfg).base_url if (azure_cfg or openai_cfg) else None,
+            # api_key deliberately never returned
+            "ollama_reachable": ollama_reachable,
+        }
+
+    @app_router.post("/settings/ai-config/test", summary="Test the deployment-wide default LLM connection")
+    def test_ai_config(current_user=Depends(get_current_user_fn)):
+        from .agents.llm_service import default_azure_config_from_env, default_openai_config_from_env
+
+        cfg = default_azure_config_from_env() or default_openai_config_from_env()
+        if cfg is None:
+            return {
+                "reachable": False, "latency_ms": 0, "model_tested": "n/a",
+                "message": "No platform default configured — set DEFAULT_AZURE_OPENAI_* or DEFAULT_OPENAI_* in the backend .env",
+            }
+        from . import ai_service
+        return ai_service.test_provider(
+            cfg.provider, cfg.api_key, base_url=cfg.base_url, model=cfg.model, api_version=cfg.api_version,
+        )
+
     # ── NEW: Latest completed video for a project ─────────────────────────────
     @app_router.get("/video/render/latest/{project_id}", summary="Get latest completed render for project")
     def get_latest_render(
@@ -1842,8 +1973,6 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
         slide = body.get("slide", {})
         project_id = body.get("project_id")
 
-        provider, api_key = _get_project_provider(db, project_id) if project_id else (None, None)
-
         title = slide.get("title", "")
         content = slide.get("content", "")
         notes = slide.get("speaker_notes", "")
@@ -1873,13 +2002,18 @@ Return ONLY a JSON object (no markdown, no explanation) with keys:
         user_msg = f"Slide title: {title}\nSubtitle: {subtitle}\nContent:\n{content}\nSpeaker notes: {notes}"
 
         try:
-            from . import ai_service as _ai
-            # Honour the Settings-selected model / fallback chain instead of a
-            # hardcoded model, so this respects local model switching.
-            active_model = os.getenv("OLLAMA_MODEL") or "llama3.1:8b-instruct-q4_K_M"
+            from .agents.llm_service import LLMService
+            from pydantic import BaseModel as _BaseModel
+
+            class _SlideActionOut(_BaseModel):
+                title: str = ""
+                subtitle: str = ""
+                content: str = ""
+                speaker_notes: str = ""
+
+            llm = LLMService(db=db, project_id=project_id, role="review", timeout=60)
             result = await run_in_threadpool(
-                _ai._live_generate, provider or "ollama", api_key, system, user_msg,
-                model=active_model
+                lambda: llm.generate_json(system, user_msg, schema=_SlideActionOut).model_dump()
             )
             if result and isinstance(result, dict) and "title" in result:
                 return {"success": True, "slide": result}
@@ -1914,6 +2048,38 @@ Return ONLY a JSON object (no markdown, no explanation) with keys:
             }
         }
 
+    # ── NEW: Regenerate just one slide's diagram (no full-deck rebuild) ───────
+    @app_router.post("/media-studio/slide-diagram", summary="Regenerate the diagram for a single slide")
+    async def slide_diagram_action(
+        request: Request,
+        current_user=Depends(get_current_user_fn),
+    ):
+        """Renders a fresh architecture/workflow diagram for one slide's
+        current title/content via the local, always-available diagram
+        renderer (same one used for PDF auto-diagrams) and returns just the
+        updated diagram_image path — the rest of the slide is untouched, and
+        no other slide in the deck is regenerated."""
+        body = await request.json()
+        slide = body.get("slide", {})
+        diagram_type = body.get("diagram_type") or (
+            "architecture" if "architecture" in str(slide.get("title", "")).lower() else "workflow"
+        )
+
+        try:
+            import uuid as _uuid
+            from .native_diagram_renderer import spec_from_text, render as native_render
+            from .diagram_service import default_storage_base
+
+            bullets_text = str(slide.get("content", "")).replace("• ", "\n").strip() or slide.get("title", "")
+            spec = spec_from_text(bullets_text, diagram_type)
+            out_dir = default_storage_base() / "diagrams" / "slide_action"
+            base = f"slide_{_uuid.uuid4().hex[:10]}"
+            _svg_path, png_path = native_render(spec, out_dir, base)
+            return {"success": True, "diagram_image": str(png_path)}
+        except Exception as exc:
+            logger.error("[MediaStudio] slide_diagram_action failed: %s", exc, exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Diagram generation failed: {exc}")
+
     # ── NEW: Generate narration for all slides ────────────────────────────────
     @app_router.post("/media-studio/generate-narration", summary="Generate AI narration for all slides")
     async def generate_narration(
@@ -1926,8 +2092,6 @@ Return ONLY a JSON object (no markdown, no explanation) with keys:
         slides = body.get("slides", [])
         style = body.get("style", "professional")
 
-        provider, api_key = _get_project_provider(db, project_id) if project_id else (None, None)
-
         style_desc = {
             "professional": "formal, confident, business-appropriate",
             "conversational": "warm, engaging, natural spoken language",
@@ -1935,8 +2099,9 @@ Return ONLY a JSON object (no markdown, no explanation) with keys:
             "storytelling": "narrative, engaging, emotional connection",
         }.get(style, "professional")
 
-        from . import ai_service as _ai2
+        from .agents.llm_service import LLMService
 
+        llm = LLMService(db=db, project_id=project_id, role="narration", timeout=60)
         narrated_slides = []
         for i, slide in enumerate(slides):
             system = f"""You are a professional presentation narrator. Generate spoken narration for this slide in a {style_desc} style.
@@ -1945,11 +2110,12 @@ Return ONLY the narration text — no JSON, no markdown, just the words to speak
             user_msg = f"Slide {i+1}: {slide.get('title', '')}\nContent: {slide.get('content', '')}"
 
             try:
-                # _live_generate returns dict; for plain text we need raw call
+                narration_text = llm.generate_text(system, user_msg, temperature=0.4)
+                narrated_slides.append({**slide, "speaker_notes": narration_text.strip()[:900]})
+            except Exception as exc:
+                logger.warning("[MediaStudio] generate_narration LLM call failed for slide %d (%s) — deterministic fallback", i + 1, exc)
                 narration_text = slide.get("title", "") + ". " + slide.get("content", "").replace("•", "").replace("\n", ". ")
                 narrated_slides.append({**slide, "speaker_notes": narration_text[:300]})
-            except Exception:
-                narrated_slides.append(slide)
 
         return {"success": True, "slides": narrated_slides}
 
@@ -1968,7 +2134,7 @@ Return ONLY the narration text — no JSON, no markdown, just the words to speak
             ]
         }
 
-    @app_router.post("/video/render/from-pdf", summary="Understand a PDF and generate a full narrated presentation video")
+    @app_router.post("/video/render/from-pdf", summary="Understand a PDF and generate an editable presentation (optionally start rendering immediately)")
     async def render_from_pdf(
         pdf_file: UploadFile = File(...),
         project_id: int = Form(...),
@@ -1979,18 +2145,25 @@ Return ONLY the narration text — no JSON, no markdown, just the words to speak
         avatar_id: str = Form("professional_male"),
         presenter_type: str = Form("cartoon"),
         gen_mode: str = Form("presentation_video"),
+        start_render: bool = Form(False),
         db=Depends(get_db_fn),
         current_user=Depends(get_current_user_fn),
     ):
-        """PDF -> understand the document -> consulting-quality presentation
-        (with diagrams where relevant) -> editable script -> voice -> video.
+        """PDF -> understand the document -> one slide per PDF page, editable
+        in the workspace.
 
-        Fully automatic, no manual intervention. A single bounded LLM call
-        (<=55s, small/fast planning model) turns the document into a
-        structured, narrated slide deck; if the model is unavailable or
-        times out, a deterministic section-based builder produces an
-        equally complete (if less bespoke) deck instantly, so this endpoint
-        never hangs and never fails outright."""
+        By default this ONLY produces the editable slide deck — it does NOT
+        start a video render. That lets the user pick a page range (or edit
+        content) in the workspace first, then explicitly render via
+        /video/render with just the slides they selected. Pass
+        start_render=true to preserve the old one-shot "understand + render
+        everything immediately" behavior for callers that want it.
+
+        A single bounded LLM call (<=55s, small/fast planning model) turns
+        the document into a structured, narrated slide deck; if the model is
+        unavailable or times out, a deterministic section-based builder
+        produces an equally complete (if less bespoke) deck instantly, so
+        this endpoint never hangs and never fails outright."""
         import tempfile, os as _os
 
         if not pdf_file.filename or not pdf_file.filename.lower().endswith(".pdf"):
@@ -2002,7 +2175,7 @@ Return ONLY the narration text — no JSON, no markdown, just the words to speak
             tmp_path = tmp.name
 
         try:
-            full_text, page_count = _extract_pdf_text(tmp_path)
+            full_text, page_count, pdf_pages = _extract_pdf_text(tmp_path)
         finally:
             _os.unlink(tmp_path)
 
@@ -2013,25 +2186,29 @@ Return ONLY the narration text — no JSON, no markdown, just the words to speak
         project_name = project.name if project else (pdf_file.filename or "Document").rsplit(".", 1)[0]
 
         slides = await run_in_threadpool(
-            _understand_document_to_slides, full_text, project_name, page_count
+            _understand_document_to_slides, full_text, project_name, page_count, pdf_pages,
+            db=db, project_id=project_id,
         )
 
-        job = create_job(
-            project_id=project_id,
-            slides=slides,
-            mode=mode,
-            theme_id=theme_id,
-            voice_id=voice_id,
-            avatar_id=avatar_id,
-            presenter_type=presenter_type,
-            voice_speed=voice_speed,
-        )
-        job.message = f"PDF source: {pdf_file.filename} ({page_count} pages -> {len(slides)} slides)"
-        _executor.submit(run_pipeline, job, get_db_fn, _save_video_artifacts)
+        job_id = None
+        if start_render:
+            job = create_job(
+                project_id=project_id,
+                slides=slides,
+                mode=mode,
+                theme_id=theme_id,
+                voice_id=voice_id,
+                avatar_id=avatar_id,
+                presenter_type=presenter_type,
+                voice_speed=voice_speed,
+            )
+            job.message = f"PDF source: {pdf_file.filename} ({page_count} pages -> {len(slides)} slides)"
+            _executor.submit(run_pipeline, job, get_db_fn, _save_video_artifacts)
+            job_id = job.job_id
 
         return {
-            "job_id": job.job_id, "slide_count": len(slides), "source": "pdf",
-            "slides": slides,  # returned so the UI can open the editable script immediately
+            "job_id": job_id, "slide_count": len(slides), "source": "pdf",
+            "slides": slides,  # returned so the UI can open the editable deck immediately
         }
 
     @app_router.post("/video/import-pptx", summary="Import an existing .pptx as editable slides")

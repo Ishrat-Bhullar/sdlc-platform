@@ -27,10 +27,29 @@ Workspace delivery:
     GET  /generated_artifacts
 """
 import os
+import secrets
 import uuid
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load backend/.env explicitly (by path, not cwd) so GROQ_API_KEY/
+# DEFAULT_AZURE_OPENAI_*/etc. are always picked up regardless of the
+# working directory the server was launched from (e.g. `uvicorn
+# fastapi_agents.main:app --app-dir backend` runs with cwd at the repo
+# root, not backend/) — this is what makes ".env-only" provider swaps
+# (Groq <-> Azure) actually take effect without any code change.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+# Uvicorn only configures its own "uvicorn"/"uvicorn.access"/"uvicorn.error"
+# loggers — the root logger otherwise has no handler, so every plain
+# `logging.getLogger(...).info(...)` call in this codebase (e.g.
+# llm_service.py's "request served by <provider>" line, added specifically
+# so provider routing can be verified via the server log) is silently
+# dropped. Configuring the root logger here makes all of it visible.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 import jwt
 from cryptography.fernet import Fernet
@@ -44,11 +63,13 @@ from .models import (
     AgentRun,
     Base,
     DashboardTimelineResponse,
+    DEMO_MODE,
     Document,
     DocumentUploadResponse,
     GeneratedArtifact,
     GeneratedArtifactOut,
     LoginRequest,
+    PROVIDER_KEY_ENCRYPTION_KEY,
     Project,
     ProjectCreate,
     ProjectDeliverable,
@@ -57,6 +78,7 @@ from .models import (
     ProjectStatus,
     ProviderConfiguration,
     RunStatus,
+    _ensure_provider_configuration_columns,
     TimelineEvent,
     User,
     UserCreate,
@@ -68,18 +90,31 @@ from .models import (
 # ===========================================================================
 # Configuration
 # ===========================================================================
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "VfiW3bUtPut1O7yDWkPxujl6ua3FpjRx7P_QjQmmjtRel8OqGbR7IXZkyCjzmx7L")
-JWT_REFRESH_SECRET_KEY = os.getenv("JWT_REFRESH_SECRET_KEY", "Kna7ilHIQH5cRA7CmzfcAxyEq6hQVzl_J2KRx9LJCVAmmKxJlunMMe-K-ld5oDeC")
+# No fixed literal fallback here on purpose — a hardcoded default secret
+# baked into source is readable by anyone with the code. If these aren't set
+# in .env, generate a random ephemeral one (logged loudly below) so the
+# server still starts, but every restart invalidates existing sessions/
+# encrypted BYOK rows rather than silently using one fixed, guessable value.
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or secrets.token_urlsafe(48)
+JWT_REFRESH_SECRET_KEY = os.getenv("JWT_REFRESH_SECRET_KEY") or secrets.token_urlsafe(48)
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 
-PROVIDER_KEY_ENCRYPTION_KEY = os.getenv("PROVIDER_KEY_ENCRYPTION_KEY", "wSqu6lOQVJ2WhQddQB-TNdPSBQVmeLVC7AQ-9hszUDY=")
+# PROVIDER_KEY_ENCRYPTION_KEY and DEMO_MODE are centralized in models.py
+# (imported above) — every module reads the exact same value the exact same
+# way, rather than each independently re-parsing the env var (which is how a
+# stale/missing value could previously make one module disagree with another).
+if not os.getenv("PROVIDER_KEY_ENCRYPTION_KEY") or not os.getenv("JWT_SECRET_KEY"):
+    logging.warning(
+        "JWT_SECRET_KEY / PROVIDER_KEY_ENCRYPTION_KEY not set in .env — using a random "
+        "ephemeral value for this process. Sessions won't survive a restart and any "
+        "already-encrypted BYOK provider keys won't decrypt. Set these in .env for production."
+    )
 _fernet = Fernet(PROVIDER_KEY_ENCRYPTION_KEY.encode())
 
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 STORAGE_BASE_PATH = Path(os.getenv("STORAGE_BASE_PATH", "./storage"))
-DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
 DEMO_EMAIL = "ishratbhullar@gmail.com"
 logger = logging.getLogger("sdlc.demo")
 
@@ -140,6 +175,7 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
+    _ensure_provider_configuration_columns(engine)
     STORAGE_BASE_PATH.mkdir(parents=True, exist_ok=True)
 
 

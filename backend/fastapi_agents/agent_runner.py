@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import traceback
 from datetime import datetime, timezone
 from typing import Any
@@ -29,6 +30,8 @@ from .models import (
     get_db,
 )
 from .ws_manager import manager
+
+logger = logging.getLogger(__name__)
 
 
 PIPELINE: list[str] = [
@@ -257,7 +260,7 @@ async def _safe_execute(db: Session, run: AgentRun, project: Project) -> None:
         await _execute_agent(db, run, project)
     except Exception as exc:
         tb = traceback.format_exc()
-        print(f"[agent_runner] {run.agent_name} FAILED: {exc}\n{tb}")
+        logger.error("[agent_runner] %s FAILED: %s\n%s", run.agent_name, exc, tb)
         try:
             run.status = RunStatus.FAILED.value
             run.end_time = datetime.now(timezone.utc)
@@ -278,7 +281,7 @@ async def run_agent(project_id: int, run_id: int) -> None:
     try:
         run = db.get(AgentRun, run_id)
         if run is None or run.project_id != project_id:
-            print(f"[agent_runner] run {run_id} not found for project {project_id}")
+            logger.warning("[agent_runner] run %s not found for project %s", run_id, project_id)
             return
         if run.status == RunStatus.RUNNING.value:
             return
@@ -391,7 +394,7 @@ async def run_pipeline(project_id: int) -> None:
 
         # Wait for Review 1 approval
         if not _approval_is_approved(db, project_id, ArtifactType.REVIEW_1_CHECKPOINT.value):
-            print(f"[agent_runner] Pipeline paused at Human Review Checkpoint 1 for project {project_id}")
+            logger.info("[agent_runner] Pipeline paused at Human Review Checkpoint 1 for project %s", project_id)
             return
 
         # Solution Architecture
@@ -444,7 +447,7 @@ async def run_pipeline(project_id: int) -> None:
 
         # Wait for Review 2 approval
         if not _approval_is_approved(db, project_id, ArtifactType.REVIEW_2_CHECKPOINT.value):
-            print(f"[agent_runner] Pipeline paused at Human Review Checkpoint 2 for project {project_id}")
+            logger.info("[agent_runner] Pipeline paused at Human Review Checkpoint 2 for project %s", project_id)
             return
 
         # Presentation & Video

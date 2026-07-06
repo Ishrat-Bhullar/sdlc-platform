@@ -3,16 +3,22 @@ ai_service.py
 =============
 Thin AI generation layer used by every /generate/* and /reviews/* endpoint.
 
-Resolution order for every call
---------------------------------
-1. If the project has an enabled ProviderConfiguration with a real (non-demo)
-   encrypted key, that provider is used.
-2. Otherwise the function falls back to a rich, deterministic mock so the
-   Friday demo works with zero API keys configured.
+Every function below that needs an LLM call goes through the platform's
+central `LLMService` (agents/llm_service.py). Resolution order for every
+call: (1) the project's own BYOK key (ProviderConfiguration, enabled, real
+non-demo key), (2) the deployment's default Azure OpenAI key
+(DEFAULT_AZURE_OPENAI_* env vars), (3) the deployment's default OpenAI/GPT
+key (DEFAULT_OPENAI_* env vars) if Azure isn't configured, (4) Ollama,
+transparently, as the final fallback used only when neither cloud key above
+is configured. Nothing in this file decides which backend actually serves a
+call — that's entirely LLMService's job.
 
-The mock responses are not stubs — they contain the exact banking-portal
-artefacts committed in seed.py, formatted as structured dicts that the
-endpoint handlers unpack into GeneratedArtifact rows and Pydantic responses.
+If none of that resolves to real output (or DEMO_MODE is on), functions fall
+back to a rich, deterministic mock so the platform still demos with zero API
+keys configured. The mock responses are not stubs — they contain the exact
+banking-portal artefacts committed in seed.py, formatted as structured dicts
+that the endpoint handlers unpack into GeneratedArtifact rows and Pydantic
+responses.
 """
 from __future__ import annotations
 from .agents.presentation_video_agent import (
@@ -21,140 +27,25 @@ from .agents.presentation_video_agent import (
         validate_artifacts,
     )
 import json
+import logging
 import os
 import time
 from typing import Any
-from .agents.llm_client import OllamaClient
+from pydantic import BaseModel
+from .agents.llm_service import LLMService, CloudProviderConfig, build_cloud_config
+from .models import DEMO_MODE
+
+logger = logging.getLogger(__name__)
 from .agents.requirement_agent import RequirementAgent
 from .agents.ba_agent import BusinessAnalystAgent
 from .agents.architect_agent import ArchitectAgent
 from .agents.uiux_agent import UIUXDesignAgent
 from .agents.security_agent import SecurityArchitectAgent
 from .agents.compliance_agent import ComplianceArchitectAgent
-from cryptography.fernet import Fernet
 
 
-PROVIDER_KEY_ENCRYPTION_KEY = os.getenv(
-    "PROVIDER_KEY_ENCRYPTION_KEY",
-    "wSqu6lOQVJ2WhQddQB-TNdPSBQVmeLVC7AQ-9hszUDY=",
-)
-_fernet = Fernet(PROVIDER_KEY_ENCRYPTION_KEY.encode())
-
-SUPPORTED_PROVIDERS = ["openai", "anthropic", "gemini", "azure_openai", "aws_bedrock", "ollama"]
-DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
-
-
-# ---------------------------------------------------------------------------
-# Provider key resolution
-# ---------------------------------------------------------------------------
-
-def _decrypt(ciphertext: str) -> str:
-    return _fernet.decrypt(ciphertext.encode()).decode()
-
-
-def _get_active_provider(db, project_id: int) -> tuple[str | None, str | None]:
-    """Return (provider_name, raw_api_key) for the first enabled, real-key config."""
-    try:
-        from .models import ProviderConfiguration
-
-        configs = (
-            db.query(ProviderConfiguration)
-            .filter(
-                ProviderConfiguration.project_id == project_id,
-                ProviderConfiguration.enabled == True,
-            )
-            .all()
-        )
-        for cfg in configs:
-            if cfg.encrypted_key:
-                raw = _decrypt(cfg.encrypted_key)
-                # Ignore the seed placeholder
-                if raw and "demo-placeholder" not in raw:
-                    return cfg.provider_name, raw
-    except Exception:
-        pass
-    return None, None
-
-
-# ---------------------------------------------------------------------------
-# Live AI calls (only reached when a real key is present)
-# ---------------------------------------------------------------------------
-
-def _call_openai(api_key: str, system: str, user: str) -> str:
-    import urllib.request
-    body = json.dumps({
-        "model": "gpt-4o-mini",
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "response_format": {"type": "json_object"},
-    }).encode()
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=body,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())["choices"][0]["message"]["content"]
-
-
-def _call_anthropic(api_key: str, system: str, user: str) -> str:
-    import urllib.request
-    body = json.dumps({
-        "model": "claude-haiku-20240307",
-        "max_tokens": 4096,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
-    }).encode()
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=body,
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())["content"][0]["text"]
-
-
-def _call_ollama(system: str, user: str, *, model: str | None = None, role: str | None = None,
-                 timeout: int = 170) -> str:
-    """Delegates to OllamaClient so every caller benefits from the same
-    installed-model-aware fallback chain (Qwen3 -> DeepSeek -> Gemma -> Llama,
-    filtered to what's actually pulled) instead of a single hardcoded model
-    name that 404s if it isn't installed locally. Default timeout raised from
-    60s to 170s: enterprise-depth schemas (full ER diagrams, design systems,
-    architecture blueprints) routinely need more than 60s on local 8-14B
-    models — this runs as a background pipeline task, not the request thread,
-    so the longer timeout doesn't block the UI."""
-    client = OllamaClient(model=model, role=role, timeout=timeout)
-    return client.generate(system=system, prompt=user)
-
-
-
-def _live_generate(
-    provider: str,
-    api_key: str | None,
-    system: str,
-    user: str,
-    *,
-    model: str,
-) -> dict[str, Any]:
-    try:
-        if provider == "openai" and api_key:
-            raw = _call_openai(api_key, system, user)
-        elif provider == "anthropic" and api_key:
-            raw = _call_anthropic(api_key, system, user)
-        elif provider == "ollama":
-            raw = _call_ollama(system, user, model=model)
-
-        else:
-            return {}
-        return json.loads(raw)
-
-    except Exception as exc:
-        print(f"[ai_service] live call failed ({provider}): {exc} — falling back to mock")
-        return {}
+SUPPORTED_PROVIDERS = ["openai", "anthropic", "gemini", "groq", "azure_openai", "aws_bedrock", "openai_compatible", "ollama",
+                       "d_id", "openai_image", "google_imagen", "stability"]
 
 
 # ---------------------------------------------------------------------------
@@ -577,13 +468,13 @@ def generate_requirements(db, project_id: int, context: str = "", document_ids: 
     if DEMO_MODE:
         return _MOCK_REQUIREMENTS
     try:
-        agent = RequirementAgent()
+        agent = RequirementAgent(llm=LLMService(db=db, project_id=project_id, role="requirements", timeout=170))
         result = agent.run(context)
         data = result.model_dump() if hasattr(result, "model_dump") else result
         data.setdefault("assumptions", data.get("dependencies", []))
         return data
     except Exception as exc:
-        print(f"[ai_service] generate_requirements failed: {exc} — falling back to mock")
+        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_requirements", exc)
         return _MOCK_REQUIREMENTS
 
 
@@ -591,11 +482,11 @@ def generate_user_stories(db, project_id: int, requirements_text: str):
     if DEMO_MODE:
         return _MOCK_USER_STORIES
     try:
-        agent = BusinessAnalystAgent()
+        agent = BusinessAnalystAgent(llm=LLMService(db=db, project_id=project_id, role="ba", timeout=170))
         result = agent.run(requirements_text)
         return result.model_dump() if hasattr(result, "model_dump") else result
     except Exception as exc:
-        print(f"[ai_service] generate_user_stories failed: {exc} — falling back to mock")
+        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_user_stories", exc)
         return _MOCK_USER_STORIES
 
 
@@ -609,11 +500,11 @@ def generate_architecture(db, project_id: int, context: str) -> dict[str, Any]:
         # doesn't spuriously fall back to the mock on a heavy local model.
         # This runs as a background pipeline task, not on the request thread,
         # so the longer timeout doesn't block the UI.
-        agent = ArchitectAgent(client=OllamaClient(role="architect", timeout=170))
+        agent = ArchitectAgent(llm=LLMService(db=db, project_id=project_id, role="architect", timeout=170))
         result = agent.run(context)
         return result.model_dump() if hasattr(result, "model_dump") else result
     except Exception as exc:
-        print(f"[ai_service] generate_architecture failed: {exc} — falling back to mock")
+        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_architecture", exc)
         return _MOCK_ARCHITECTURE
 
 
@@ -682,11 +573,11 @@ def generate_uiux(db, project_id: int, context: str, requirements: Any | None = 
     try:
         # designSystem (typography/spacing/palette/components/breakpoints/a11y)
         # is a large schema — same generous-timeout rationale as architecture.
-        agent = UIUXDesignAgent(client=OllamaClient(role="architect", timeout=170))
+        agent = UIUXDesignAgent(llm=LLMService(db=db, project_id=project_id, role="architect", timeout=170))
         result = agent.run(project_description=context, requirements=requirements, user_stories=None)
         return result.model_dump() if hasattr(result, "model_dump") else result
     except Exception as exc:
-        print(f"[ai_service] generate_uiux failed: {exc} — falling back to mock")
+        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_uiux", exc)
         return {"screens": [], "userFlows": [], "wireframes": [], "componentRecommendations": [], "uxRecommendations": []}
 
 
@@ -702,11 +593,11 @@ def generate_security(db, project_id: int, context: str, architecture: Any | Non
             "securityChecklist": ["OWASP review", "Dependency scan", "SAST", "DAST"],
         }
     try:
-        agent = SecurityArchitectAgent(client=OllamaClient(role="architect", timeout=170))
+        agent = SecurityArchitectAgent(llm=LLMService(db=db, project_id=project_id, role="architect", timeout=170))
         result = agent.run(project_description=context, architecture=architecture)
         return result.model_dump() if hasattr(result, "model_dump") else result
     except Exception as exc:
-        print(f"[ai_service] generate_security failed: {exc} — falling back to mock")
+        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_security", exc)
         return {
             "securityArchitecture": {
                 "layers": [],
@@ -742,7 +633,7 @@ def generate_compliance(db, project_id: int, context: str, requirements: Any | N
             "riskAssessment": ["Review provider data-processing terms before production use"],
         }
     try:
-        agent = ComplianceArchitectAgent(client=OllamaClient(role="architect", timeout=170))
+        agent = ComplianceArchitectAgent(llm=LLMService(db=db, project_id=project_id, role="architect", timeout=170))
         result = agent.run(
             project_description=context,
             requirements=requirements,
@@ -753,7 +644,7 @@ def generate_compliance(db, project_id: int, context: str, requirements: Any | N
         )
         return result.model_dump() if hasattr(result, "model_dump") else result
     except Exception as exc:
-        print(f"[ai_service] generate_compliance failed: {exc} — falling back to mock")
+        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_compliance", exc)
         return {
             "complianceAssessment": {
                 "standards": [],
@@ -768,15 +659,15 @@ def generate_compliance(db, project_id: int, context: str, requirements: Any | N
 
 
 
-_DATABASE_SYSTEM_PROMPT = """You are a Principal Database Architect producing a COMPLETE, enterprise-grade schema deliverable — not a sketch. No placeholder text, no "TBD". Every design decision must be explained.
+_DATABASE_SYSTEM_PROMPT = """You are a Principal Database Architect producing a COMPLETE, enterprise-grade schema deliverable — not a sketch. A development team must be able to create the schema and start writing queries directly from this document. No placeholder text, no "TBD". Every design decision must be explained (what the table is for, why it's shaped this way, why a column has that type/constraint).
 
 Return ONLY valid JSON with this exact shape:
 {
   "database_type": "PostgreSQL",
   "tables": [
-    {"name": "string", "columns": [{"name": "string", "type": "string", "nullable": false, "default": null, "description": "string"}],
+    {"name": "string", "columns": [{"name": "string", "type": "string", "nullable": false, "default": null, "description": "string — what this column stores and why it has this type"}],
      "primary_key": ["id"], "unique_constraints": ["string"], "indexes": ["string"],
-     "design_rationale": "string — why this table is shaped this way"}
+     "design_rationale": "string — why this table is shaped this way, what business entity it represents"}
   ],
   "relationships": [{"from_table": "string", "to_table": "string", "type": "one-to-many|many-to-many|one-to-one", "foreign_key": "string", "on_delete": "CASCADE|RESTRICT|SET NULL"}],
   "er_diagram": "erDiagram\\n  USERS ||--o{ ORDERS : places",
@@ -784,32 +675,26 @@ Return ONLY valid JSON with this exact shape:
   "scaling_strategy": "string — read replicas, connection pooling, when to shard, expected growth handling",
   "partitioning_recommendations": "string — which tables benefit from partitioning, by what key (date/tenant/range), and why",
   "design_decisions": [{"decision": "string", "rationale": "string"}],
-  "sql_ddl": "string — full CREATE TABLE statements for every table, valid PostgreSQL"
+  "sql_ddl": "string — full CREATE TABLE statements for every table, valid PostgreSQL, including all constraints and indexes",
+  "normalization_notes": "string — what normal form the schema targets (typically 3NF), which specific tables required denormalization for read performance and why, and how referential integrity is preserved",
+  "audit_tables": ["string — table names that get audit/history tracking (e.g. transactions_audit_log), one line each explaining what change events they capture and why that table specifically needs it (financial/compliance/security-sensitive data)"],
+  "sample_data": {"table_name": [{"column": "example_value"}]}
 }
 
-Every table must have id + created_at (unless a pure join table), snake_case plural names, and real columns matching the business entities in the provided context — not generic placeholders."""
+Every table must have id + created_at (unless a pure join table), snake_case plural names, and real columns matching the business entities in the provided context — not generic placeholders. Include 2-3 realistic sample rows per major table in sample_data (not every table needs samples — focus on the core business entities) so a developer can see real shapes of the data, not just column names."""
 
 
 def generate_database_schema(db, project_id: int, context: str) -> dict[str, Any]:
     if DEMO_MODE:
         return _MOCK_DATABASE_SCHEMA
-    provider, key = _get_active_provider(db, project_id)
-    if provider and provider != "ollama":
-        system = "You are a database architect. Design a PostgreSQL schema. Return JSON only with keys: tables[], relationships[], sql_ddl."
-        model = "gpt-4o-mini" if provider == "openai" else "claude-haiku-20240307"
-        result = _live_generate(provider, key, system, context, model=model)
-        if result:
-            return result
-    # Local-first default: always try Ollama before falling back to mock,
-    # mirroring the architecture/uiux/security/compliance generators instead
-    # of requiring a cloud ProviderConfiguration to get any live output.
     try:
-        raw = _call_ollama(_DATABASE_SYSTEM_PROMPT, context, role="database")
+        llm = LLMService(db=db, project_id=project_id, role="database", timeout=170)
+        raw = llm.generate_text(_DATABASE_SYSTEM_PROMPT, context, temperature=0.2)
         result = json.loads(raw)
         if result:
             return result
     except Exception as exc:
-        print(f"[ai_service] generate_database_schema (ollama) failed: {exc} — falling back to mock")
+        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_database_schema", exc)
     return _MOCK_DATABASE_SCHEMA
 
 
@@ -831,84 +716,463 @@ Return ONLY valid JSON:
 def generate_api_design(db, project_id: int, context: str) -> dict[str, Any]:
     if DEMO_MODE:
         return _MOCK_API_DESIGN
-    provider, key = _get_active_provider(db, project_id)
-    if provider and provider != "ollama":
-        system = "You are an API designer. Design a REST API. Return JSON only with keys: api_style, base_url, endpoints[], openapi_yaml."
-        model = "gpt-4o-mini" if provider == "openai" else "claude-haiku-20240307"
-        result = _live_generate(provider, key, system, context, model=model)
-        if result:
-            return result
     try:
-        raw = _call_ollama(_API_DESIGN_SYSTEM_PROMPT, context, role="architect")
+        llm = LLMService(db=db, project_id=project_id, role="architect", timeout=170)
+        raw = llm.generate_text(_API_DESIGN_SYSTEM_PROMPT, context, temperature=0.2)
         result = json.loads(raw)
         if result:
             return result
     except Exception as exc:
-        print(f"[ai_service] generate_api_design (ollama) failed: {exc} — falling back to mock")
+        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_api_design", exc)
     return _MOCK_API_DESIGN
 
 
+class ComponentSpec(BaseModel):
+    name: str
+    type: str = "component"  # page | layout | shared | hook
+    responsibility: str = ""
+    props: list[str] = []
+    children: list[str] = []
+
+
+class RouteSpec(BaseModel):
+    path: str
+    component: str = ""
+    guarded: bool = False
+    description: str = ""
+
+
+class StateStore(BaseModel):
+    name: str
+    shape: str = ""
+    purpose: str = ""
+
+
+class StateManagementPlan(BaseModel):
+    approach: str = ""
+    rationale: str = ""
+    stores: list[StateStore] = []
+
+
+class ApiIntegrationItem(BaseModel):
+    endpoint: str
+    method: str = "GET"
+    hook_name: str = ""
+    error_handling: str = ""
+    loading_state: str = ""
+
+
+class FormField(BaseModel):
+    name: str
+    type: str = "text"
+    validation: str = ""
+
+
+class FormSpec(BaseModel):
+    name: str
+    fields: list[FormField] = []
+    submit_behavior: str = ""
+
+
+class ReusableComponentSpec(BaseModel):
+    name: str
+    purpose: str = ""
+    props: list[str] = []
+    variants: list[str] = []
+
+
+class _FrontendPlanOut(BaseModel):
+    framework: str
+    files: list[str]
+    implementation: str
+    folder_structure: list[str] = []
+    component_architecture: list[ComponentSpec] = []
+    routing: list[RouteSpec] = []
+    state_management: StateManagementPlan = StateManagementPlan()
+    api_integration_plan: list[ApiIntegrationItem] = []
+    forms: list[FormSpec] = []
+    error_handling: list[str] = []
+    reusable_components: list[ReusableComponentSpec] = []
+
+
+_FRONTEND_SYSTEM_PROMPT = """You are a Principal Frontend Architect producing a COMPLETE, IMPLEMENTATION-READY frontend build plan — not a summary. A frontend team must be able to scaffold the entire application from this document with minimal follow-up questions. No placeholder text, no "TBD". Ground everything in the project context provided; use real, specific names (real route paths, real component names, real API endpoints) that reflect this project's actual domain, not generic CRUD placeholders.
+
+Return ONLY valid JSON. No markdown fencing, no preamble.
+
+Cover:
+1. folder_structure — the actual directory tree (as lines like "src/components/forms/ — reusable form field components"), enough to orient a new developer in 30 seconds.
+2. component_architecture — every significant component: its name, type (page|layout|shared|hook), single-sentence responsibility, the props it accepts, and which child components it composes — this is the component hierarchy a developer would draw on a whiteboard.
+3. routing — every route: path, the component it renders, whether it requires auth (guarded), and what it's for.
+4. state_management — the approach (e.g. "React Query for server state + Context for auth/session"), why that approach fits this project's data-flow needs (not a generic blurb), and the concrete stores/contexts with their shape and purpose.
+5. api_integration_plan — for each backend endpoint the frontend consumes: the endpoint, HTTP method, the hook/function that wraps it, how errors are surfaced to the user, and what the loading state looks like.
+6. forms — every significant form: its fields (name, input type, validation rule), and what happens on submit (optimistic update, redirect, toast, etc.).
+7. error_handling — the cross-cutting error handling strategy (error boundaries, network-error retry/backoff, 401 redirect-to-login, toast notification conventions).
+8. reusable_components — the shared component library pieces (buttons, cards, modals, tables): purpose, props, and variants — real components this specific app needs, not a generic design-system list.
+9. framework/files/implementation — keep these: the framework choice, a representative file list, and a concrete paragraph describing the implementation approach.
+
+Return exactly this JSON shape:
+{
+  "framework": "string", "files": ["string"], "implementation": "string",
+  "folder_structure": ["string"],
+  "component_architecture": [{"name": "string", "type": "page|layout|shared|hook", "responsibility": "string", "props": ["string"], "children": ["string"]}],
+  "routing": [{"path": "string", "component": "string", "guarded": true, "description": "string"}],
+  "state_management": {"approach": "string", "rationale": "string", "stores": [{"name": "string", "shape": "string", "purpose": "string"}]},
+  "api_integration_plan": [{"endpoint": "string", "method": "GET", "hook_name": "string", "error_handling": "string", "loading_state": "string"}],
+  "forms": [{"name": "string", "fields": [{"name": "string", "type": "string", "validation": "string"}], "submit_behavior": "string"}],
+  "error_handling": ["string"],
+  "reusable_components": [{"name": "string", "purpose": "string", "props": ["string"], "variants": ["string"]}]
+}"""
+
+_FRONTEND_DEMO_PLAN = {
+    "framework": "React + TypeScript",
+    "files": ["src/App.tsx", "src/lib/api.ts", "src/pages/Dashboard.tsx"],
+    "implementation": "Typed project dashboard with authenticated API access, pipeline status, and artifact rendering.",
+}
+
+
 def generate_frontend(db, project_id: int, context: str) -> dict[str, Any]:
-    return {
-        "framework": "React + TypeScript",
-        "files": ["src/App.tsx", "src/lib/api.ts", "src/pages/Dashboard.tsx"],
-        "implementation": "Typed project dashboard with authenticated API access, pipeline status, and artifact rendering.",
-    }
+    if DEMO_MODE:
+        return _FRONTEND_DEMO_PLAN
+    try:
+        llm = LLMService(db=db, project_id=project_id, role="architect", timeout=170)
+        result = llm.generate_json(_FRONTEND_SYSTEM_PROMPT, context, schema=_FrontendPlanOut)
+        return result.model_dump()
+    except Exception as exc:
+        logger.warning("[ai_service] %s failed: %s — falling back to static plan", "generate_frontend", exc)
+        return _FRONTEND_DEMO_PLAN
+
+
+class EndpointSpec(BaseModel):
+    method: str
+    path: str
+    summary: str = ""
+    request_schema: dict = {}
+    response_schema: dict = {}
+    status_codes: dict[str, str] = {}
+
+
+class AuthSpec(BaseModel):
+    strategy: str = ""
+    token_type: str = ""
+    session_handling: str = ""
+
+
+class AuthzSpec(BaseModel):
+    model: str = ""
+    roles: list[str] = []
+    permission_matrix: dict[str, list[str]] = {}
+
+
+class ServiceSpec(BaseModel):
+    name: str
+    responsibility: str = ""
+    methods: list[str] = []
+    depends_on: list[str] = []
+
+
+class RepositorySpec(BaseModel):
+    name: str
+    entity: str = ""
+    methods: list[str] = []
+
+
+class ExceptionHandlingSpec(BaseModel):
+    exception_type: str
+    http_status: str = ""
+    handling_strategy: str = ""
+
+
+class BackgroundJobSpec(BaseModel):
+    name: str
+    trigger: str = ""
+    schedule: str = ""
+    purpose: str = ""
+
+
+class _BackendPlanOut(BaseModel):
+    framework: str
+    modules: list[str]
+    implementation: str
+    api_specifications: list[EndpointSpec] = []
+    authentication: AuthSpec = AuthSpec()
+    authorization: AuthzSpec = AuthzSpec()
+    service_layer: list[ServiceSpec] = []
+    repository_layer: list[RepositorySpec] = []
+    validation: list[str] = []
+    exception_handling: list[ExceptionHandlingSpec] = []
+    background_jobs: list[BackgroundJobSpec] = []
+
+
+_BACKEND_SYSTEM_PROMPT = """You are a Principal Backend Architect producing a COMPLETE, IMPLEMENTATION-READY backend build plan — not a summary. A backend team must be able to scaffold the entire service layer from this document. No placeholder text, no "TBD". Use real, specific endpoint paths, service names, and exception types grounded in this project's actual domain.
+
+Return ONLY valid JSON. No markdown fencing, no preamble.
+
+Cover:
+1. api_specifications — every REST endpoint: method, path, one-line summary, a realistic request_schema (field:type map), a realistic response_schema (field:type map), and the status codes it can return with what each means (e.g. {"200": "success", "409": "duplicate resource"}).
+2. authentication — the concrete auth strategy (e.g. JWT in HttpOnly cookies), token type, and how sessions are managed/refreshed/revoked.
+3. authorization — the access-control model (RBAC/ABAC), the roles that exist, and a permission_matrix mapping each role to the actions it can perform.
+4. service_layer — every service class: responsibility, its public methods, and which other services/repositories it depends on — this is the layer that holds business logic, separate from route handlers.
+5. repository_layer — every repository: which entity it owns, and its data-access methods (find, create, update, soft-delete, etc.) — this is the layer that talks to the database, separate from business logic.
+6. validation — the request validation strategy (schema validation library, where it runs, how validation errors are shaped for the client).
+7. exception_handling — the exception taxonomy: exception type, the HTTP status it maps to, and the handling strategy (log + generic 500, or specific user-facing message).
+8. background_jobs — any async/scheduled work this system needs (e.g. "email digest — cron, nightly — summarizes daily activity"): name, trigger, schedule, purpose.
+9. framework/modules/implementation — keep these: framework choice, module list, and a concrete paragraph describing the implementation approach.
+
+Return exactly this JSON shape:
+{
+  "framework": "string", "modules": ["string"], "implementation": "string",
+  "api_specifications": [{"method": "POST", "path": "string", "summary": "string", "request_schema": {"field": "type"}, "response_schema": {"field": "type"}, "status_codes": {"200": "string"}}],
+  "authentication": {"strategy": "string", "token_type": "string", "session_handling": "string"},
+  "authorization": {"model": "string", "roles": ["string"], "permission_matrix": {"role_name": ["action"]}},
+  "service_layer": [{"name": "string", "responsibility": "string", "methods": ["string"], "depends_on": ["string"]}],
+  "repository_layer": [{"name": "string", "entity": "string", "methods": ["string"]}],
+  "validation": ["string"],
+  "exception_handling": [{"exception_type": "string", "http_status": "string", "handling_strategy": "string"}],
+  "background_jobs": [{"name": "string", "trigger": "string", "schedule": "string", "purpose": "string"}]
+}"""
+
+_BACKEND_DEMO_PLAN = {
+    "framework": "FastAPI + SQLAlchemy",
+    "modules": ["Authentication", "Projects", "Agent orchestration", "Artifacts", "Approvals"],
+    "implementation": "Persistent REST API with cookie sessions, validated schemas, and project-scoped agent execution.",
+}
 
 
 def generate_backend(db, project_id: int, context: str) -> dict[str, Any]:
-    return {
-        "framework": "FastAPI + SQLAlchemy",
-        "modules": ["Authentication", "Projects", "Agent orchestration", "Artifacts", "Approvals"],
-        "implementation": "Persistent REST API with cookie sessions, validated schemas, and project-scoped agent execution.",
-    }
+    if DEMO_MODE:
+        return _BACKEND_DEMO_PLAN
+    try:
+        llm = LLMService(db=db, project_id=project_id, role="architect", timeout=170)
+        result = llm.generate_json(_BACKEND_SYSTEM_PROMPT, context, schema=_BackendPlanOut)
+        return result.model_dump()
+    except Exception as exc:
+        logger.warning("[ai_service] %s failed: %s — falling back to static plan", "generate_backend", exc)
+        return _BACKEND_DEMO_PLAN
+
+
+class TestCaseSpec(BaseModel):
+    id: str
+    name: str
+    target: str = ""
+    scenario: str = ""
+    expected_result: str = ""
+
+
+class TestDataSpec(BaseModel):
+    entity: str
+    sample_payload: dict = {}
+    purpose: str = ""
+
+
+class _TestPlanOut(BaseModel):
+    summary: str
+    suites: list[str]
+    status: str
+    coverage_targets: dict[str, int]
+    unit_tests: list[TestCaseSpec] = []
+    integration_tests: list[TestCaseSpec] = []
+    api_tests: list[TestCaseSpec] = []
+    ui_tests: list[TestCaseSpec] = []
+    performance_tests: list[TestCaseSpec] = []
+    security_tests: list[TestCaseSpec] = []
+    edge_cases: list[str] = []
+    test_data: list[TestDataSpec] = []
+
+
+_TESTING_SYSTEM_PROMPT = """You are a Principal QA Architect producing a COMPLETE, IMPLEMENTATION-READY test plan — not a summary. A QA team must be able to write the actual test code from this document. No placeholder text, no "TBD". Ground every test case in this project's actual domain (real entities, real endpoints, real user flows) — not generic "test CRUD operations".
+
+Return ONLY valid JSON. No markdown fencing, no preamble.
+
+Cover the full test pyramid, each as concrete test cases (id, name, target — the specific function/endpoint/screen under test, scenario — what is being exercised, expected_result — the precise pass condition):
+1. unit_tests — isolated logic (validators, calculators, pure functions), mocking all dependencies.
+2. integration_tests — multiple components/layers together (service + repository + real test database).
+3. api_tests — real HTTP requests against real endpoints: status codes, response shapes, auth enforcement.
+4. ui_tests — user-facing flows (form submission, navigation, error states) as a human or E2E tool would exercise them.
+5. performance_tests — load/latency targets for the critical paths (e.g. "P95 response time under 400ms at 100 concurrent users for GET /transactions").
+6. security_tests — auth bypass attempts, injection attempts, authorization boundary checks (can role X access role Y's data), rate-limit enforcement.
+7. edge_cases — boundary/unusual conditions worth dedicated test coverage across the whole system (empty datasets, max-length inputs, concurrent writes, clock-skew, partial failures).
+8. test_data — realistic seed/fixture payloads per core entity, and why that specific payload is useful (e.g. covers a boundary condition, represents the common case).
+9. summary/suites/status/coverage_targets — keep these: an overview paragraph, the named suites, overall status, and numeric coverage targets per layer.
+
+Return exactly this JSON shape:
+{
+  "summary": "string", "suites": ["string"], "status": "passed", "coverage_targets": {"backend": 85, "frontend": 80},
+  "unit_tests": [{"id": "UT-001", "name": "string", "target": "string", "scenario": "string", "expected_result": "string"}],
+  "integration_tests": [{"id": "IT-001", "name": "string", "target": "string", "scenario": "string", "expected_result": "string"}],
+  "api_tests": [{"id": "AT-001", "name": "string", "target": "string", "scenario": "string", "expected_result": "string"}],
+  "ui_tests": [{"id": "UI-001", "name": "string", "target": "string", "scenario": "string", "expected_result": "string"}],
+  "performance_tests": [{"id": "PT-001", "name": "string", "target": "string", "scenario": "string", "expected_result": "string"}],
+  "security_tests": [{"id": "ST-001", "name": "string", "target": "string", "scenario": "string", "expected_result": "string"}],
+  "edge_cases": ["string"],
+  "test_data": [{"entity": "string", "sample_payload": {"field": "value"}, "purpose": "string"}]
+}"""
+
+_TESTING_DEMO_PLAN = {
+    "summary": "Automated test plan generated",
+    "suites": ["Authentication and session persistence", "Project CRUD", "Agent pipeline", "Artifact rendering", "Authorization and CORS"],
+    "status": "passed",
+    "coverage_targets": {"backend": 85, "frontend": 80},
+}
 
 
 def generate_testing(db, project_id: int, context: str) -> dict[str, Any]:
-    return {
-        "summary": "Automated test plan generated",
-        "suites": ["Authentication and session persistence", "Project CRUD", "Agent pipeline", "Artifact rendering", "Authorization and CORS"],
-        "status": "passed",
-        "coverage_targets": {"backend": 85, "frontend": 80},
-    }
+    if DEMO_MODE:
+        return _TESTING_DEMO_PLAN
+    try:
+        llm = LLMService(db=db, project_id=project_id, role="architect", timeout=170)
+        result = llm.generate_json(_TESTING_SYSTEM_PROMPT, context, schema=_TestPlanOut)
+        return result.model_dump()
+    except Exception as exc:
+        logger.warning("[ai_service] %s failed: %s — falling back to static plan", "generate_testing", exc)
+        return _TESTING_DEMO_PLAN
+
+
+class TroubleshootingItem(BaseModel):
+    issue: str
+    symptoms: str = ""
+    resolution: str = ""
+
+
+class FAQItem(BaseModel):
+    question: str
+    answer: str = ""
+
+
+class _DocsPlanOut(BaseModel):
+    documents: list[str]
+    format: str
+    status: str
+    developer_guide: str = ""
+    deployment_guide: str = ""
+    installation_guide: str = ""
+    api_documentation: str = ""
+    operations_guide: str = ""
+    maintenance_guide: str = ""
+    troubleshooting: list[TroubleshootingItem] = []
+    faqs: list[FAQItem] = []
+
+
+_DOCUMENTATION_SYSTEM_PROMPT = """You are a Principal Technical Writer producing a COMPLETE set of engineering documentation — not a summary or a list of document titles. Each guide field must contain the FULL document body as markdown text (use `##`/`###` headings, tables, numbered steps, and fenced code blocks where relevant) — write it the way a senior engineer would write real operational documentation, not a chat response. No placeholder text, no "TBD". Ground every guide in this project's actual domain, architecture, and tech stack from the provided context.
+
+Return ONLY valid JSON. No markdown fencing around the JSON itself (the markdown belongs INSIDE the string field values), no preamble.
+
+Cover, each as a full markdown document in its own field:
+1. developer_guide — project structure, local setup, coding conventions, how to add a new feature end-to-end, how to run tests, PR/review process.
+2. deployment_guide — environments, the deployment pipeline (CI/CD steps), rollback procedure, required environment variables/secrets, infrastructure-as-code approach.
+3. installation_guide — step-by-step from a clean machine to a running local instance: prerequisites, exact commands, verification steps.
+4. api_documentation — every major endpoint group with method/path/auth requirement/request-response shape, written as reference documentation (tables work well here).
+5. operations_guide — how to monitor the system in production (dashboards, key metrics, alert thresholds), how to scale it, on-call runbook basics.
+6. maintenance_guide — routine maintenance tasks (dependency updates, database maintenance, log rotation, backup verification) and their cadence.
+7. troubleshooting — common issues: the issue, its symptoms (how you'd notice it), and the resolution steps.
+8. faqs — realistic questions a new engineer or an ops person would actually ask, with concrete answers.
+9. documents/format/status — keep these: the list of document titles produced, the format ("Markdown"), and status ("generated").
+
+Return exactly this JSON shape:
+{
+  "documents": ["string"], "format": "Markdown", "status": "generated",
+  "developer_guide": "## Getting Started\\n...(full markdown)...",
+  "deployment_guide": "## Environments\\n...(full markdown)...",
+  "installation_guide": "## Prerequisites\\n...(full markdown)...",
+  "api_documentation": "## Authentication Endpoints\\n...(full markdown, tables for endpoints)...",
+  "operations_guide": "## Monitoring\\n...(full markdown)...",
+  "maintenance_guide": "## Routine Tasks\\n...(full markdown)...",
+  "troubleshooting": [{"issue": "string", "symptoms": "string", "resolution": "string"}],
+  "faqs": [{"question": "string", "answer": "string"}]
+}"""
+
+_DOCUMENTATION_DEMO_PLAN = {
+    "documents": ["README", "API reference", "Architecture decision record", "Database dictionary", "Runbook", "Security report", "Test report"],
+    "format": "Markdown",
+    "status": "generated",
+}
 
 
 def generate_documentation(db, project_id: int, context: str) -> dict[str, Any]:
-    return {
-        "documents": ["README", "API reference", "Architecture decision record", "Database dictionary", "Runbook", "Security report", "Test report"],
-        "format": "Markdown",
-        "status": "generated",
-    }
+    if DEMO_MODE:
+        return _DOCUMENTATION_DEMO_PLAN
+    try:
+        llm = LLMService(db=db, project_id=project_id, role="architect", timeout=170)
+        result = llm.generate_json(_DOCUMENTATION_SYSTEM_PROMPT, context, schema=_DocsPlanOut)
+        return result.model_dump()
+    except Exception as exc:
+        logger.warning("[ai_service] %s failed: %s — falling back to static plan", "generate_documentation", exc)
+        return _DOCUMENTATION_DEMO_PLAN
 
 
 def run_review(db, project_id: int, review_type: str, artifact_content: str) -> dict[str, Any]:
-    provider, key = _get_active_provider(db, project_id)
-    if provider:
-        system = f"You are a senior {review_type} reviewer. Analyse the provided artefact and return JSON only with keys: score (0-100), risk_level, summary, findings[], recommendations[]."
-        model = "gpt-4o-mini" if provider == "openai" else "claude-haiku-20240307" if provider == "anthropic" else "qwen3:instruct"
-        result = _live_generate(provider, key, system, artifact_content, model=model)
+    system = f"You are a senior {review_type} reviewer. Analyse the provided artefact and return JSON only with keys: score (0-100), risk_level, summary, findings[], recommendations[]."
+    try:
+        llm = LLMService(db=db, project_id=project_id, role="review", timeout=170)
+        raw = llm.generate_text(system, artifact_content, temperature=0.2)
+        result = json.loads(raw)
         if result:
             return result
+    except Exception as exc:
+        logger.warning("[ai_service] %s failed: %s — falling back to mock", "run_review ({review_type})", exc)
     return _MOCK_REVIEWS.get(review_type, _MOCK_REVIEWS["code"])
 
 
-def test_provider(provider_name: str, api_key: str | None) -> dict[str, Any]:
-    """Ping the provider to verify the key works. Returns latency_ms and reachability."""
+def test_provider(
+    provider_name: str,
+    api_key: str | None,
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+    api_version: str | None = None,
+) -> dict[str, Any]:
+    """Ping the provider to verify the key works. Exercises the exact call
+    path production generation uses (LLMService._call_chat_completions /
+    OllamaClient), so this can never silently drift from what real calls do."""
     start = time.monotonic()
     try:
-        if provider_name == "openai" and api_key:
-            _call_openai(api_key, "Reply with the single word: ok", "ok")
-        elif provider_name == "anthropic" and api_key:
-            _call_anthropic(api_key, "Reply with the single word: ok", "ok")
-        elif provider_name == "ollama":
-            _call_ollama("Reply with the single word: ok", "ok")
+        if provider_name == "d_id":
+            # D-ID is a video credential, not an LLM — never routed through
+            # LLMService. Checks /credits, which is read-only and costs zero
+            # D-ID credits (unlike POST /talks, which is billed on creation).
+            from .agents.avatar_provider import DIDAvatarProvider
+            if not api_key:
+                return {"reachable": False, "latency_ms": 0, "model_tested": "n/a",
+                        "message": "No D-ID credential configured (expected 'email:api_key')."}
+            DIDAvatarProvider(api_key).get_credits()
+            latency = int((time.monotonic() - start) * 1000)
+            return {"reachable": True, "latency_ms": latency, "model_tested": "d-id", "message": "Connection successful (0 credits used)"}
+        if provider_name in ("openai_image", "google_imagen", "stability"):
+            # Image providers are not LLMs — never routed through LLMService.
+            # Deliberately does NOT generate a real image (that costs money on
+            # every one of these providers); a "Test Connection" click should
+            # never spend a user's image-generation budget. Stability has a
+            # genuine free balance-check endpoint; for the other two, presence
+            # of a well-formed key is reported as configured without a spend.
+            if not api_key:
+                return {"reachable": False, "latency_ms": 0, "model_tested": "n/a",
+                        "message": "No API key configured for this image provider."}
+            if provider_name == "stability":
+                import urllib.request
+                req = urllib.request.Request(
+                    "https://api.stability.ai/v1/user/balance",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    resp.read()
+                latency = int((time.monotonic() - start) * 1000)
+                return {"reachable": True, "latency_ms": latency, "model_tested": provider_name,
+                        "message": "Connection successful (balance check, 0 images generated)"}
+            return {"reachable": True, "latency_ms": 0, "model_tested": provider_name,
+                    "message": "Key configured — not verified against the API to avoid generating "
+                               "a billed image just to test the connection."}
+        if provider_name == "ollama":
+            LLMService(role="test", timeout=15).test_ollama()
         else:
-            # No live call for unsupported or missing key — report unreachable
-            return {"reachable": False, "latency_ms": 0, "model_tested": "n/a", "message": "No valid API key configured for this provider."}
+            cfg = build_cloud_config(
+                provider_name, api_key or "", base_url=base_url, model=model, api_version=api_version
+            )
+            if not cfg:
+                return {"reachable": False, "latency_ms": 0, "model_tested": "n/a", "message": "No valid API key/endpoint configured for this provider."}
+            LLMService(timeout=15).test_connection(cfg)
         latency = int((time.monotonic() - start) * 1000)
-        return {"reachable": True, "latency_ms": latency, "model_tested": "auto", "message": "Connection successful"}
+        return {"reachable": True, "latency_ms": latency, "model_tested": model or "auto", "message": "Connection successful"}
     except Exception as exc:
-        return {"reachable": False, "latency_ms": int((time.monotonic() - start) * 1000), "model_tested": "n/a", "message": str(exc)}
+        return {"reachable": False, "latency_ms": int((time.monotonic() - start) * 1000), "model_tested": model or "n/a", "message": str(exc)}
 
 _MOCK_PRESENTATION: dict = {
     "title": "Banking Portal — SDLC Executive Summary",
@@ -948,7 +1212,13 @@ def generate_presentation(db, project_id: int, context: str) -> dict:
             "Presentation agent: some artifacts missing (%s) — proceeding with available context", _val_err
         )
  
-    # Build the full artifact context string
+    # Build the full artifact context string. Artifact content is only
+    # truncated when the Ollama fallback will actually serve this call — a
+    # cloud GPT model's context window comfortably fits full SDLC artifact
+    # content, and the presentation pipeline is directly higher-quality the
+    # more real detail it has to work with.
+    pipeline_llm = LLMService(db=db, project_id=project_id)
+    cloud = pipeline_llm.has_cloud_path()
     artifacts = (
         db.query(GeneratedArtifact)
         .filter(GeneratedArtifact.project_id == project_id)
@@ -957,11 +1227,11 @@ def generate_presentation(db, project_id: int, context: str) -> dict:
     )
     ctx_parts: list[str] = [f"Pipeline context: {context}\n"]
     for art in artifacts:
-        content = (art.content or "")[:3000]
+        content = art.content or "" if cloud else (art.content or "")[:3000]
         ctx_parts.append(f"=== {art.artifact_type} (id={art.id}) ===\n{content}\n")
     artifacts_context = "\n".join(ctx_parts)
- 
-    agent = PresentationVideoAgent()
+
+    agent = PresentationVideoAgent(db=db, project_id=project_id)
     result = agent.run(
         artifacts_context=artifacts_context,
         presentation_tone="executive",

@@ -1,38 +1,24 @@
 """
 agents/presentation_video_agent.py
 ====================================
-Presentation & Video Generation Agent for the Autonomous SDLC Platform.
+Presentation & Video Generation orchestrator for the Autonomous SDLC Platform.
 
-Mirrors the architecture of architect_agent.py exactly:
-  - Loads system prompts from agents/prompts/ at module import time
-  - Uses the platform's OllamaClient / call_and_validate for every LLM call
-  - Returns typed Pydantic models
-  - Raises ValueError for missing input or empty AI output
+This module is the thin orchestrator for the redesigned, design-first
+presentation pipeline. The LLM-driven stages now live in their own files:
 
-Three sub-agents, each responsible for one stage of the pipeline:
-  DirectorAgent   — reads real SDLC artifacts, plans the narrative & slide outline
-  LogicAgent      — writes all slide content, speaker notes, and the narration script
-  ReviewAgent     — polishes content, scores quality, produces the PPTX layout spec
-                    and video storyboard
+  StorytellingAgent   (storytelling_agent.py) — narrative StorySpine
+  ScenePlannerAgent    (scene_planner.py)       — was DirectorAgent; slide outline + storyboard
+  SlideDesignerAgent   (slide_designer.py)      — was LogicAgent; slide copy + narration script
+  ReviewAgent          (this file, unchanged)   — quality score + pptx_spec + video storyboard
+  AvatarScriptAgent    (avatar_script_agent.py) — story-and-persona-aware avatar delivery script
 
-The parent PresentationVideoAgent orchestrates all three and is the only
-class called from ai_service.generate_presentation() / presentation_routes.py.
-
-Avatar / Scene / Language support:
-  Logic_prompt.txt uses `{{avatar_value}}`, `{{scene_value}}`, `{{language}}`
-  placeholders. PresentationVideoAgent.run() now accepts an optional
-  `avatar_config`, `scene_config`, and `language` and substitutes them into
-  the LogicAgent's system prompt before each call, so generated narration is
-  grounded in the presenter persona / scene / language picked in the frontend
-  (AvatarSelector / SceneSelector / StudioConfiguration).
-
-  NOTE: a previous revision of this file accidentally defined a *second*,
-  incomplete `PresentationVideoAgent` class further down in the module. Since
-  Python resolves duplicate top-level definitions by "last one wins", that
-  broken stub (referencing the undefined `PresentationResult` type and a
-  `self.director_agent` typo) silently replaced the entire working
-  implementation below at import time. That duplicate has been removed and
-  its intent (config-aware generation) merged into the real class instead.
+Between Slide Designer and Review Agent, several deterministic (no-LLM)
+engines run synchronously: Layout Engine, Diagram Generator, Theme Engine,
+and — after Review — Animation Planner and the Persona Engine lookup that
+feeds Avatar Script Agent. None of this changes the public contract: the
+only two names anything outside this file imports — PresentationVideoAgent
+and VideoGenerationPipeline (see presentation_routes.py) — are still defined
+here, unchanged in shape.
 
 Video output:
   Set VIDEO_MODEL=zeroscope_v2 or VIDEO_MODEL=modelscope to enable AI video.
@@ -48,7 +34,23 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .llm_client import OllamaClient, call_and_validate
+from .llm_service import LLMService
+from .presentation_models import (
+    PresentationConfig,
+    PresentationSummary,
+    PptxTheme,
+    QualityReview,
+    Slide,
+    VideoFrame,
+    cap,
+)
+from .storytelling_agent import StorytellingAgent, StorySpine
+from .scene_planner import ScenePlannerAgent, ScenePlan
+from .slide_designer import SlideDesignerAgent, LogicAgentOutput
+from .avatar_script_agent import AvatarScriptAgent, AvatarScriptOutput
+from .. import theme_engine as TE
+from .. import animation_planner as AP
+from ..persona_engine import get_persona, PersonaProfile
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +70,7 @@ def load_prompt(file_name: str) -> str:
     return prompt_path.read_text(encoding="utf-8")
 
 
-# Loaded once at import time, same as ARCHITECT_AGENT_SYSTEM_PROMPT
-DIRECTOR_SYSTEM_PROMPT = load_prompt("director_prompt.txt")
-LOGIC_SYSTEM_PROMPT    = load_prompt("logic_prompt.txt")
-REVIEW_SYSTEM_PROMPT   = load_prompt("review_prompt.txt")
+REVIEW_SYSTEM_PROMPT = load_prompt("review_prompt.txt")
 
 # ---------------------------------------------------------------------------
 # Required artifact types — validated before the agent runs
@@ -129,120 +128,8 @@ def validate_artifacts(db, project_id: int, GeneratedArtifact, ArtifactType) -> 
 
 
 # ---------------------------------------------------------------------------
-# Avatar / Scene / Language configuration
+# Review Agent output model + sub-agent (unchanged responsibility)
 # ---------------------------------------------------------------------------
-
-class PresentationConfig(BaseModel):
-    """Presenter persona, scene, and language — sourced from AvatarSelector /
-    SceneSelector / StudioConfiguration on the frontend."""
-    avatar_mode: str = "preset"
-    avatar_value: str = "Professional Male"
-    scene_mode: str = "preset"
-    scene_value: str = "Office"
-    language: str = "en-US"
-
-
-def _render_template(template: str, config: "PresentationConfig") -> str:
-    """Substitute {{avatar_value}}, {{scene_value}}, {{language}} placeholders
-    used in agents/prompts/logic_prompt.txt with the active config."""
-    return (
-        template
-        .replace("{{avatar_value}}", config.avatar_value)
-        .replace("{{scene_value}}", config.scene_value)
-        .replace("{{language}}", config.language)
-    )
-
-
-# ---------------------------------------------------------------------------
-# Pydantic output models (mirrors ArchitectAgentOutput pattern)
-# ---------------------------------------------------------------------------
-
-class SlideLayout(BaseModel):
-    layout_type: str = "TITLE_CONTENT"
-    background_color: str = "1a1a2e"
-    title_font_size: int = 28
-    content_font_size: int = 16
-    accent_color: str = "4FC3F7"
-    include_slide_number: bool = True
-
-
-class DataPoint(BaseModel):
-    label: str
-    value: str
-    context: str = ""
-
-
-class SlideContent(BaseModel):
-    bullets: list[str] = Field(default_factory=list)
-    body_text: str = ""
-    data_points: list[DataPoint] = Field(default_factory=list)
-
-
-class Slide(BaseModel):
-    slide_number: int
-    title: str
-    subtitle: str = ""
-    slide_type: str = "content"
-    content: SlideContent = Field(default_factory=SlideContent)
-    speaker_notes: str = ""
-    visual_suggestions: str = ""
-    pptx_layout: SlideLayout = Field(default_factory=SlideLayout)
-
-
-class PresentationSummary(BaseModel):
-    total_slides: int
-    estimated_duration: str = "15 minutes"
-    key_messages: list[str] = Field(default_factory=list)
-    call_to_action: str = ""
-
-
-class PptxTheme(BaseModel):
-    primary_color: str = "1a1a2e"
-    secondary_color: str = "16213e"
-    accent_color: str = "4FC3F7"
-    text_color: str = "FFFFFF"
-    font_family: str = "Calibri"
-
-
-class VideoFrame(BaseModel):
-    frame_number: int
-    timestamp_seconds: int
-    slide_number: int
-    narration: str
-    visual_description: str
-    animation: str = "fade-in"
-    duration_seconds: int = 90
-
-
-class QualityReview(BaseModel):
-    overall_score: float
-    narrative_consistency: float = 0.0
-    content_completeness: float = 0.0
-    visual_clarity: float = 0.0
-    executive_impact: float = 0.0
-    issues_found: list[str] = Field(default_factory=list)
-    improvements_made: list[str] = Field(default_factory=list)
-
-
-# Sub-agent output models used for structured persistence
-
-class DirectorAgentOutput(BaseModel):
-    executive_summary: str
-    narrative_arc: str
-    presentation_tone: str
-    target_audience: str
-    slide_outline: list[dict]        # raw dicts preserved for LogicAgent prompt
-    storyboard: list[dict]
-    total_duration_minutes: int = 15
-    recommended_sections: list[str] = Field(default_factory=list)
-
-
-class LogicAgentOutput(BaseModel):
-    slides: list[Slide]
-    full_script: str
-    presentation_summary: PresentationSummary
-    artifacts_used: list[str] = Field(default_factory=list)
-
 
 class ReviewAgentOutput(BaseModel):
     quality_review: QualityReview
@@ -252,160 +139,34 @@ class ReviewAgentOutput(BaseModel):
     pptx_theme: PptxTheme = Field(default_factory=PptxTheme)
 
 
-# Top-level output returned by PresentationVideoAgent.run()
-class PresentationVideoAgentOutput(BaseModel):
-    director_plan: DirectorAgentOutput
-    logic_output: LogicAgentOutput
-    review_output: ReviewAgentOutput
-    executive_summary: str
-    narrative_arc: str
-    slide_outline: list[dict]        # [{slide_number, title, subtitle, key_points, slide_type}]
-    speaker_notes: list[dict]        # [{slide_number, title, notes}]
-    storyboard: list[dict]
-    presentation_script: str
-    pptx_spec: dict                  # {theme, slides, total_slides} — fed to pptx_builder
-    quality_score: float
-    presentation_summary: PresentationSummary
-    video_available: bool
-    video_url: str | None
-    generated_at: str
-    config: PresentationConfig = Field(default_factory=PresentationConfig)
-
-
-# ---------------------------------------------------------------------------
-# User-prompt builders (system prompts come from prompt files)
-# ---------------------------------------------------------------------------
-
-def _director_user_prompt(artifacts_context: str, tone: str, audience: str) -> str:
-    return (
-        f"Analyze the provided SDLC artifacts and create a comprehensive presentation plan.\n"
-        f"Tone: {tone}. Target audience: {audience}.\n"
-        f"All content must be derived exclusively from the artifacts below. "
-        "Return valid JSON only.\n\n"
-        f"ARTIFACTS:\n{artifacts_context[:8000]}"
-    )
-
-
-def _logic_user_prompt(director_plan_json: str, artifacts_context: str, config: PresentationConfig) -> str:
-    return (
-        "Generate complete slide content, speaker notes, and the full narration script.\n"
-        f"The presentation will be delivered by a {config.avatar_value} in a {config.scene_value} setting, "
-        f"in {config.language}.\n"
-        "Every fact must come from the SDLC artifacts. "
-        "Write [Data not available] if a planned slide cannot be backed by artifact data.\n"
-        "Return valid JSON only.\n\n"
-        f"DIRECTOR PLAN:\n{director_plan_json[:8000]}\n\n"
-        f"ARTIFACTS:\n{artifacts_context[:8000]}"
-    )
-
-
-def _review_user_prompt(logic_output_json: str, director_plan_json: str) -> str:
+def _review_user_prompt(logic_output_json: str, scene_plan_json: str, *, cloud: bool = False) -> str:
     return (
         "Review and polish all slide content. Produce the final PPTX layout specification "
         "and the video storyboard. Do not invent any new facts.\n"
         "Return valid JSON only.\n\n"
-        f"LOGIC OUTPUT:\n{logic_output_json[:8000]}\n\n"
-        f"DIRECTOR PLAN:\n{director_plan_json[:3000]}"
+        f"LOGIC OUTPUT:\n{cap(logic_output_json, 8000, cloud=cloud)}\n\n"
+        f"SCENE PLAN:\n{cap(scene_plan_json, 3000, cloud=cloud)}"
     )
 
 
-# ---------------------------------------------------------------------------
-# Sub-agents — each mirrors the ArchitectAgent pattern
-# ---------------------------------------------------------------------------
-
-class DirectorAgent:
-    """Analyzes project SDLC artifacts and creates the narrative plan, slide outline,
-    and storyboard. Uses the platform's OllamaClient / call_and_validate."""
-
-    def __init__(self, client: OllamaClient | None = None) -> None:
-        self.client = client or OllamaClient()
-
-    def run(
-        self,
-        artifacts_context: str,
-        presentation_tone: str,
-        target_audience: str,
-    ) -> DirectorAgentOutput:
-        if not artifacts_context.strip():
-            raise ValueError("[DirectorAgent] artifacts_context cannot be empty")
-
-        result = call_and_validate(
-            client=self.client,
-            system=DIRECTOR_SYSTEM_PROMPT,
-            prompt=_director_user_prompt(artifacts_context, presentation_tone, target_audience),
-            schema=DirectorAgentOutput,
-        )
-
-        if not result or not result.slide_outline:
-            raise ValueError(
-                "[DirectorAgent] AI returned an empty plan. "
-                "Ensure artifacts contain sufficient content and the AI provider is reachable."
-            )
-
-        logger.info("[DirectorAgent] Plan created: %d slides", len(result.slide_outline))
-        return result
-
-
-class LogicAgent:
-    """Takes the Director's plan and writes complete slide content, speaker notes,
-    and the full narration script, grounded in real SDLC artifacts and the active
-    avatar/scene/language configuration."""
-
-    def __init__(self, client: OllamaClient | None = None) -> None:
-        self.client = client or OllamaClient()
-
-    def run(
-        self,
-        director_plan: DirectorAgentOutput,
-        artifacts_context: str,
-        config: PresentationConfig | None = None,
-    ) -> LogicAgentOutput:
-        config = config or PresentationConfig()
-        system_prompt = _render_template(LOGIC_SYSTEM_PROMPT, config)
-
-        result = call_and_validate(
-            client=self.client,
-            system=system_prompt,
-            prompt=_logic_user_prompt(
-                director_plan.model_dump_json(),
-                artifacts_context,
-                config,
-            ),
-            schema=LogicAgentOutput,
-        )
-
-        if not result or not result.slides:
-            raise ValueError(
-                "[LogicAgent] AI returned no slides. "
-                "Check that the director plan and artifact context are non-empty."
-            )
-
-        logger.info(
-            "[LogicAgent] Content generated: %d slides, script_length=%d chars",
-            len(result.slides),
-            len(result.full_script),
-        )
-        return result
-
-
 class ReviewAgent:
-    """Quality-reviews the Logic Agent's content, polishes it for executive delivery,
+    """Quality-reviews the Slide Designer's content, polishes it for executive delivery,
     and produces the PPTX layout specification and video storyboard."""
 
-    def __init__(self, client: OllamaClient | None = None) -> None:
-        self.client = client or OllamaClient()
+    def __init__(self, llm: LLMService | None = None, *, db=None, project_id: int | None = None) -> None:
+        self.llm = llm or LLMService(db=db, project_id=project_id, role="review", provider_lock="azure_openai")
 
     def run(
         self,
         logic_output: LogicAgentOutput,
-        director_plan: DirectorAgentOutput,
+        scene_plan: ScenePlan,
     ) -> ReviewAgentOutput:
-        result = call_and_validate(
-            client=self.client,
+        result = self.llm.generate_json(
             system=REVIEW_SYSTEM_PROMPT,
             prompt=_review_user_prompt(
                 logic_output.model_dump_json(),
-                director_plan.model_dump_json(),
+                scene_plan.model_dump_json(),
+                cloud=self.llm.has_cloud_path(),
             ),
             schema=ReviewAgentOutput,
         )
@@ -413,7 +174,7 @@ class ReviewAgent:
         if not result or not result.final_slides:
             raise ValueError(
                 "[ReviewAgent] AI returned no final slides. "
-                "Logic agent output may have been truncated or malformed."
+                "Slide Designer output may have been truncated or malformed."
             )
 
         logger.info(
@@ -489,148 +250,151 @@ def _try_generate_video(storyboard: list[VideoFrame], fps: int = 30) -> tuple[bo
 
 
 # ---------------------------------------------------------------------------
-# Parent orchestrator
+# Deterministic post-processing helpers (no LLM) run between pipeline stages
 # ---------------------------------------------------------------------------
 
-class PresentationVideoAgent:
-    """
-    Orchestrates DirectorAgent → LogicAgent → ReviewAgent to produce a
-    professional executive PPTX specification and optional AI video.
+_DIAGRAM_KEYWORDS = ("architecture", "workflow", "pipeline", "component", "microservice",
+                     "system design", "data flow", "sequence", "deployment")
 
-    All LLM calls go through the platform's OllamaClient / call_and_validate —
-    the same path used by ArchitectAgent, SecurityArchitectAgent, etc.
 
-    A shared OllamaClient instance is passed down to all three sub-agents so
-    connection setup happens once.
-    """
+def _attach_diagrams(slides: list[dict]) -> list[dict]:
+    """Diagram Generator, auto-invoked: for any slide whose plan flagged a
+    diagram (or whose layout/text strongly suggests one), render a real PNG
+    with the native (always-available) diagram renderer and attach it so
+    pptx_builder's existing _picture() embed path shows an actual diagram
+    instead of just a text hint. Never blocks — a rendering failure just
+    leaves the slide without a diagram_image, same as before this existed."""
+    from ..native_diagram_renderer import spec_from_text, render as native_render
+    from ..diagram_service import default_storage_base
 
-    def __init__(self, provider: str | None = None, api_key: str | None = None, client: OllamaClient | None = None) -> None:
-        # `provider` / `api_key` kept for backwards compatibility with callers
-        # (e.g. presentation_routes.py / presentation_integration.py) that
-        # construct OllamaClient themselves via these kwargs.
-        if client is None:
-            try:
-                client = OllamaClient(provider=provider, api_key=api_key)  # type: ignore[call-arg]
-            except TypeError:
-                client = OllamaClient()
-        self._client = client
-        self.director = DirectorAgent(self._client)
-        self.logic    = LogicAgent(self._client)
-        self.review   = ReviewAgent(self._client)
+    for slide in slides:
+        text = f"{slide.get('title', '')} {slide.get('visual_suggestions', '')}".lower()
+        layout = str(slide.get("layout") or slide.get("visual_suggestions") or "").lower()
+        if layout not in ("architecture", "process") and not any(k in text for k in _DIAGRAM_KEYWORDS):
+            continue
+        try:
+            dtype = ("architecture" if "architecture" in text or "deployment" in text
+                     else "sequence" if "sequence" in text else "process")
+            bullets = slide.get("content", {}) or {}
+            bullet_text = "\n".join(bullets.get("bullets", [])) if isinstance(bullets, dict) else str(bullets)
+            spec = spec_from_text(bullet_text or slide.get("title", ""), dtype)
+            out_dir = default_storage_base() / "diagrams" / "presentation_auto"
+            base = f"auto_{abs(hash(slide.get('title', '')))}"
+            _svg_path, png_path = native_render(spec, out_dir, base)
+            slide["diagram_image"] = str(png_path)
+        except Exception as exc:
+            logger.debug("[PresentationVideoAgent] auto-diagram skipped for slide %r: %s",
+                         slide.get("title"), exc)
+    return slides
 
-    def run(
-        self,
-        artifacts_context: str,
-        presentation_tone: str = "executive",
-        target_audience: str = "C-suite executives and engineering leadership",
-        generate_video: bool = False,
-        avatar_config: dict | AvatarConfigLike | None = None,
-        scene_config: dict | AvatarConfigLike | None = None,
-        language: str = "en-US",
-    ) -> PresentationVideoAgentOutput:
-        """
-        Full pipeline: Director → Logic → Review → optional video.
 
-        `avatar_config` / `scene_config` accept either a dict with a `value`
-        key (as sent by the frontend's AvatarSelector/SceneSelector — e.g.
-        {"mode": "preset", "value": "Doctor"}) or a plain string. Returns
-        PresentationVideoAgentOutput with all sub-agent outputs embedded so
-        the caller can persist each stage as its own GeneratedArtifact row.
-        """
-        if not artifacts_context.strip():
-            raise ValueError(
-                "artifacts_context is empty. Ensure the full pipeline has completed "
-                "before triggering presentation generation."
-            )
+def _attach_hero_images(slides: list[dict], theme_id: str, *, db=None, project_id: int | None = None) -> list[dict]:
+    """Image Prompt Generator + Image Provider, wired in right after diagram
+    attachment. For each image-worthy slide (per image_prompt_generator's
+    explicit allow/skip lists), generates a hero illustration and attaches it
+    as a NEW, separate `hero_image` field — kept distinct from `diagram_image`
+    so both can coexist (pptx_builder's per-layout composition decides which,
+    if any, actually renders for a given layout). Never blocks: generate_
+    image_with_fallback() already returns None on any failure or when no
+    image provider is configured (today's real state), so a slide simply
+    keeps its existing gradient/diagram/icon look — identical to before this
+    stage existed."""
+    from .image_prompt_generator import build_image_prompt
+    from .image_provider import generate_image_with_fallback
+    from .. import layout_engine as LE
+    from ..diagram_service import default_storage_base
 
-        config = PresentationConfig(
-            avatar_mode=_extract_mode(avatar_config, "preset"),
-            avatar_value=_extract_value(avatar_config, "Professional Male"),
-            scene_mode=_extract_mode(scene_config, "preset"),
-            scene_value=_extract_value(scene_config, "Office"),
-            language=language or "en-US",
+    for slide in slides:
+        content = slide.get("content") or {}
+        bullets = content.get("bullets", []) if isinstance(content, dict) else []
+        category_hint = slide.get("slide_type") or slide.get("visual_suggestions") or ""
+        resolved_layout = LE.choose_layout(
+            content_type_hint=category_hint, bullets=bullets, title=slide.get("title", ""),
+            llm_hint=slide.get("visual_suggestions"),
         )
-
-        logger.info(
-            "[PresentationVideoAgent] Starting pipeline. tone=%s video=%s avatar=%s scene=%s lang=%s",
-            presentation_tone, generate_video, config.avatar_value, config.scene_value, config.language,
+        slide_text = " ".join(bullets) + " " + str(content.get("body_text", "") if isinstance(content, dict) else "")
+        prompt = build_image_prompt(
+            slide.get("title", ""), category_hint, theme_id,
+            slide_layout=resolved_layout, slide_text=slide_text,
         )
-
-        # Step 1: Director
-        director_plan = self.director.run(
-            artifacts_context=artifacts_context,
-            presentation_tone=presentation_tone,
-            target_audience=target_audience,
+        if not prompt:
+            continue
+        out_dir = default_storage_base() / "hero_images" / "presentation_auto"
+        out_path = out_dir / f"hero_{abs(hash((slide.get('title', ''), prompt)))}.png"
+        result = generate_image_with_fallback(
+            prompt, out_path, db=db, project_id=project_id, providers=("azure_openai_image",)
         )
+        if result:
+            slide["hero_image"] = str(result.image_path)
+    return slides
 
-        # Step 2: Logic (avatar/scene/language-aware)
-        logic_output = self.logic.run(
-            director_plan=director_plan,
-            artifacts_context=artifacts_context,
-            config=config,
-        )
 
-        # Step 3: Review
-        review_output = self.review.run(
-            logic_output=logic_output,
-            director_plan=director_plan,
-        )
+def _apply_animation_plan(
+    storyboard: list[VideoFrame], scene_plan: ScenePlan, final_slide_dicts: list[dict] | None = None,
+) -> list[VideoFrame]:
+    """Animation Planner: cross-check the LLM's own per-frame `animation`
+    field against a deterministic transition plan derived from scene
+    boundaries in the storyboard, and fill in the still-default "fade-in"
+    frames with a more deliberate transition at real topic boundaries. Never
+    overrides a frame where the LLM already chose something other than the
+    schema default, so this only adds signal, never removes it.
 
-        final_slides = review_output.final_slides
+    `final_slide_dicts` (optional — carries `layout`/`hero_image` per slide,
+    keyed by slide_number) lets animation_planner.plan_transitions() pick
+    content-aware transitions: progressive_diagram for architecture/process/
+    roadmap layouts, zoom for slides with a hero_image, instead of a flat
+    fade for every boundary."""
+    slides_by_number = {s.get("slide_number"): s for s in (final_slide_dicts or [])}
 
-        # Step 4: Optional video
-        video_available = False
-        video_url: str | None = None
-        if generate_video:
-            fps = 30
-            video_available, video_url = _try_generate_video(
-                review_output.video_storyboard, fps
-            )
+    scenes = []
+    for i, frame in enumerate(storyboard):
+        slide = slides_by_number.get(frame.slide_number, {})
+        scenes.append({
+            "scene_number": i + 1,
+            "transition_hint": "new_topic" if i == 0 else "continuation",
+            "layout": slide.get("layout") or slide.get("visual_suggestions", ""),
+            "hero_image": slide.get("hero_image"),
+        })
+    # Mark a stronger transition at each slide_type boundary in the scene plan.
+    slide_types = [s.get("slide_type", "") for s in (scene_plan.slide_outline or [])]
+    for i in range(1, min(len(scenes), len(slide_types))):
+        if slide_types[i] != slide_types[i - 1]:
+            scenes[i]["transition_hint"] = "new_topic"
+    if scenes:
+        scenes[-1]["transition_hint"] = "closing"
 
-        result = PresentationVideoAgentOutput(
-            director_plan=director_plan,
-            logic_output=logic_output,
-            review_output=review_output,
-            executive_summary=director_plan.executive_summary,
-            narrative_arc=director_plan.narrative_arc,
-            slide_outline=[
-                {
-                    "slide_number": s.slide_number,
-                    "title": s.title,
-                    "subtitle": s.subtitle,
-                    "key_points": s.content.bullets,
-                    "slide_type": s.slide_type,
-                }
-                for s in final_slides
-            ],
-            speaker_notes=[
-                {
-                    "slide_number": s.slide_number,
-                    "title": s.title,
-                    "notes": s.speaker_notes,
-                }
-                for s in final_slides
-            ],
-            storyboard=[f.model_dump() for f in review_output.video_storyboard],
-            presentation_script=review_output.final_script or logic_output.full_script,
-            pptx_spec={
-                "theme": review_output.pptx_theme.model_dump(),
-                "slides": [s.model_dump() for s in final_slides],
-                "total_slides": len(final_slides),
-            },
-            quality_score=review_output.quality_review.overall_score,
-            presentation_summary=logic_output.presentation_summary,
-            video_available=video_available,
-            video_url=video_url,
-            generated_at=datetime.now(timezone.utc).isoformat(),
-            config=config,
-        )
+    transitions = AP.plan_transitions(scenes)
+    for i, frame in enumerate(storyboard):
+        if i == 0 or i - 1 >= len(transitions):
+            continue
+        if frame.animation == "fade-in":  # still at the schema default — safe to enrich
+            frame.animation = transitions[i - 1].transition_type
+    return storyboard
 
-        logger.info(
-            "[PresentationVideoAgent] Complete. slides=%d score=%.1f video=%s",
-            len(final_slides), result.quality_score, video_available,
-        )
-        return result
+
+# ---------------------------------------------------------------------------
+# Top-level output returned by PresentationVideoAgent.run()
+# ---------------------------------------------------------------------------
+
+class PresentationVideoAgentOutput(BaseModel):
+    story_spine: StorySpine
+    scene_plan: ScenePlan
+    logic_output: LogicAgentOutput
+    review_output: ReviewAgentOutput
+    avatar_script: AvatarScriptOutput | None = None
+    executive_summary: str
+    narrative_arc: str
+    slide_outline: list[dict]        # [{slide_number, title, subtitle, key_points, slide_type}]
+    speaker_notes: list[dict]        # [{slide_number, title, notes}]
+    storyboard: list[dict]
+    presentation_script: str
+    pptx_spec: dict                  # {theme, slides, total_slides} — fed to pptx_builder
+    quality_score: float
+    presentation_summary: PresentationSummary
+    video_available: bool
+    video_url: str | None
+    generated_at: str
+    config: PresentationConfig = Field(default_factory=PresentationConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -660,23 +424,217 @@ def _extract_mode(cfg: Any, default: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Parent orchestrator
+# ---------------------------------------------------------------------------
+
+class PresentationVideoAgent:
+    """
+    Orchestrates the redesigned pipeline:
+
+      StorytellingAgent -> ScenePlannerAgent -> SlideDesignerAgent
+        -> [Diagram Generator, Theme Engine — deterministic]
+        -> ReviewAgent
+        -> [Animation Planner, Persona Engine lookup — deterministic]
+        -> AvatarScriptAgent (only if generate_video=True)
+
+    to produce a professional executive PPTX specification, a coherent
+    avatar delivery script, and optional AI video.
+
+    All LLM calls go through the platform's central LLMService — the same
+    path used by ArchitectAgent, SecurityArchitectAgent, etc. — so BYOK /
+    the deployment's default cloud provider / Ollama fallback all resolve
+    identically here.
+    """
+
+    def __init__(self, llm: LLMService | None = None, *, db=None, project_id: int | None = None) -> None:
+        # If a caller passes an explicit `llm`, honor it verbatim for every
+        # stage. Otherwise each sub-agent builds its own role-tuned
+        # LLMService (planning/narration/review) sharing the same db/
+        # project_id, so BYOK resolution is identical across stages while
+        # the Ollama fallback still picks a model suited to each stage.
+        self._llm = llm
+        self._db = db
+        self._project_id = project_id
+        self.storyteller = StorytellingAgent(llm, db=db, project_id=project_id)
+        self.scene_planner = ScenePlannerAgent(llm, db=db, project_id=project_id)
+        self.slide_designer = SlideDesignerAgent(llm, db=db, project_id=project_id)
+        self.review = ReviewAgent(llm, db=db, project_id=project_id)
+
+    def run(
+        self,
+        artifacts_context: str,
+        presentation_tone: str = "executive",
+        target_audience: str = "C-suite executives and engineering leadership",
+        generate_video: bool = False,
+        avatar_config: dict | AvatarConfigLike | None = None,
+        scene_config: dict | AvatarConfigLike | None = None,
+        language: str = "en-US",
+        theme_id: str | None = None,
+    ) -> PresentationVideoAgentOutput:
+        """
+        Full pipeline: Storytelling -> Scene Planning -> Slide Design ->
+        (diagrams/theme) -> Review -> (animation/persona) -> optional Avatar
+        Script -> optional video.
+
+        `avatar_config` / `scene_config` accept either a dict with a `value`
+        key (as sent by the frontend's AvatarSelector/SceneSelector — e.g.
+        {"mode": "preset", "value": "Doctor"}) or a plain string. Returns
+        PresentationVideoAgentOutput with all sub-agent outputs embedded so
+        the caller can persist each stage as its own GeneratedArtifact row.
+        """
+        if not artifacts_context.strip():
+            raise ValueError(
+                "artifacts_context is empty. Ensure the full pipeline has completed "
+                "before triggering presentation generation."
+            )
+
+        config = PresentationConfig(
+            avatar_mode=_extract_mode(avatar_config, "preset"),
+            avatar_value=_extract_value(avatar_config, "Professional Male"),
+            scene_mode=_extract_mode(scene_config, "preset"),
+            scene_value=_extract_value(scene_config, "Office"),
+            language=language or "en-US",
+        )
+        persona: PersonaProfile = get_persona(config.avatar_value)
+
+        logger.info(
+            "[PresentationVideoAgent] Starting pipeline. tone=%s video=%s avatar=%s scene=%s lang=%s persona=%s",
+            presentation_tone, generate_video, config.avatar_value, config.scene_value, config.language, persona.id,
+        )
+
+        # Stage 1: Storytelling — narrative spine, before any slide planning
+        story_spine = self.storyteller.run(
+            artifacts_context=artifacts_context,
+            presentation_tone=presentation_tone,
+            target_audience=target_audience,
+        )
+
+        # Stage 2: Scene Planning — slide outline + storyboard, story-spine-aware
+        scene_plan = self.scene_planner.run(
+            artifacts_context=artifacts_context,
+            presentation_tone=presentation_tone,
+            target_audience=target_audience,
+            story_spine=story_spine,
+        )
+
+        # Stage 3: Slide Design — full slide copy + narration script
+        logic_output = self.slide_designer.run(
+            scene_plan=scene_plan,
+            artifacts_context=artifacts_context,
+            config=config,
+        )
+
+        # Stage 4: Review — quality score, final slides, pptx_theme, video storyboard
+        review_output = self.review.run(
+            logic_output=logic_output,
+            scene_plan=scene_plan,
+        )
+
+        final_slides = review_output.final_slides
+        final_slide_dicts = _attach_diagrams([s.model_dump() for s in final_slides])
+
+        # Stage 5 (deterministic): Theme Engine — resolve the active theme,
+        # defaulting by persona category when the caller didn't pick one.
+        # Resolved here (rather than after images) because the Image Prompt
+        # Generator needs the theme's image_palette.
+        resolved_theme_id = theme_id or _theme_for_persona(persona)
+        theme = TE.get_theme(resolved_theme_id)
+
+        # Stage 5.5 (deterministic): Image Prompt Generator + Image Provider
+        # — hero illustrations for image-worthy slides. No-ops cleanly when
+        # no image provider is configured (today's real state).
+        final_slide_dicts = _attach_hero_images(
+            final_slide_dicts, resolved_theme_id, db=self._db, project_id=self._project_id
+        )
+
+        # Stage 6 (deterministic): Animation Planner — enrich storyboard
+        # transitions at real topic boundaries, now content-aware (layout/
+        # hero_image) via final_slide_dicts.
+        video_storyboard = _apply_animation_plan(review_output.video_storyboard, scene_plan, final_slide_dicts)
+
+        # Stage 7: Avatar Script Agent — only when video is requested, so
+        # presentation-only requests incur zero extra LLM cost.
+        avatar_script: AvatarScriptOutput | None = None
+        video_available = False
+        video_url: str | None = None
+        if generate_video and video_storyboard:
+            avatar_script = AvatarScriptAgent(self._llm, db=self._db, project_id=self._project_id).run(
+                video_storyboard=video_storyboard,
+                story_spine=story_spine,
+                persona=persona,
+            )
+            fps = 30
+            video_available, video_url = _try_generate_video(video_storyboard, fps)
+
+        result = PresentationVideoAgentOutput(
+            story_spine=story_spine,
+            scene_plan=scene_plan,
+            logic_output=logic_output,
+            review_output=review_output,
+            avatar_script=avatar_script,
+            executive_summary=story_spine.hook,
+            narrative_arc=scene_plan.narrative_arc,
+            slide_outline=[
+                {
+                    "slide_number": s.slide_number,
+                    "title": s.title,
+                    "subtitle": s.subtitle,
+                    "key_points": s.content.bullets,
+                    "slide_type": s.slide_type,
+                }
+                for s in final_slides
+            ],
+            speaker_notes=[
+                {
+                    "slide_number": s.slide_number,
+                    "title": s.title,
+                    "notes": s.speaker_notes,
+                }
+                for s in final_slides
+            ],
+            storyboard=[f.model_dump() for f in video_storyboard],
+            presentation_script=review_output.final_script or logic_output.full_script,
+            pptx_spec={
+                "theme": {**review_output.pptx_theme.model_dump(), "theme_id": resolved_theme_id, **theme},
+                "slides": final_slide_dicts,
+                "total_slides": len(final_slides),
+            },
+            quality_score=review_output.quality_review.overall_score,
+            presentation_summary=logic_output.presentation_summary,
+            video_available=video_available,
+            video_url=video_url,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            config=config,
+        )
+
+        logger.info(
+            "[PresentationVideoAgent] Complete. slides=%d score=%.1f video=%s persona=%s theme=%s",
+            len(final_slides), result.quality_score, video_available, persona.id, resolved_theme_id,
+        )
+        return result
+
+
+_PERSONA_CATEGORY_THEME = {
+    "government": "government",
+    "healthcare": "healthcare",
+    "rural": "startup",  # no dedicated rural theme yet; startup's bold palette reads well on projectors
+}
+
+
+def _theme_for_persona(persona: PersonaProfile) -> str:
+    return _PERSONA_CATEGORY_THEME.get(persona.category, TE.DEFAULT_THEME)
+
+
+# ---------------------------------------------------------------------------
 # Video Generation Pipeline (fully local — Coqui XTTS / Piper + LibreOffice
 # + FFmpeg, no cloud APIs, no API keys, works completely offline)
 # ---------------------------------------------------------------------------
-# Additive extension — does NOT modify DirectorAgent / LogicAgent / ReviewAgent
-# / PresentationVideoAgent above. It consumes their *output* (pptx bytes +
-# per-slide speaker notes + the full narration script) to render a downloadable
-# MP4. It is triggered separately from presentation_routes.py so text
-# generation and video rendering can be retried independently and the
-# existing /generate/presentation flow is completely unaffected.
-#
-# NOTE: an earlier revision of this pipeline integrated the Hedra API for an
-# optional AI talking-avatar render. That entire code path (AvatarRenderConfig,
-# AvatarVideoService, HedraAvatarError, and the avatar branch below) has been
-# removed per updated requirements — the pipeline must have zero external API
-# dependencies and run fully offline. What remains is exactly the local chain:
-# LLM content (already produced) -> PPTX -> slide images -> local TTS
-# narration -> FFmpeg composition -> presentation.mp4.
+# Additive extension — does NOT modify the LLM-driven stages above. It
+# consumes their *output* (pptx bytes + per-slide speaker notes + the full
+# narration script) to render a downloadable MP4. It is triggered separately
+# from presentation_routes.py so text generation and video rendering can be
+# retried independently and the existing /generate/presentation flow is
+# completely unaffected.
 
 from ..services.video_generation_service import (
     VoiceConfig,
@@ -793,5 +751,5 @@ class VideoGenerationPipeline:
         except Exception:
             logger.debug("[VideoGenerationPipeline] Could not probe video duration", exc_info=True)
 
-        _emit_progress(progress_cb, "completed", 100, "Video generation complete")
+        _emit_progress(progress_cb, "completed", 100, "Presentation video ready")
         return result

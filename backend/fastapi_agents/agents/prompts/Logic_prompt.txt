@@ -23,7 +23,9 @@ ON-SLIDE COPY: Keep slide text tight and scannable — short phrases, not senten
 
 PACING: Write speaker_notes as natural spoken prose with sentence variety and deliberate emphasis. Roughly 55–110 spoken words per content slide (shorter for section/title slides). Assume an unhurried, confident cadence.
 
-For each slide, populate `pptx_layout.layout_type` sensibly and put the visual layout hint from the plan (title/section/architecture/process/comparison/kpi_cards/table/chart/timeline/roadmap/items/two_col/quote/closing) into `visual_suggestions` so the renderer can pick the right layout. Put the spoken narration in `speaker_notes`. Provide `content.bullets` for card/bullet slides, `content.data_points` for metric slides, and `content.body_text` only when a short lead paragraph is genuinely needed.
+For each slide, populate `pptx_layout.layout_type` sensibly and put the visual layout hint from the plan (title/section/architecture/process/comparison/kpi_cards/table/chart/timeline/roadmap/items/two_col/quote/closing/hero) into `visual_suggestions` so the renderer can pick the right layout. `hero` is a full-bleed, image-led statement slide — only use it where the plan called for it (a single powerful narrative beat, not routine content). Put the spoken narration in `speaker_notes`. Provide `content.bullets` for card/bullet slides, `content.data_points` for metric slides, and `content.body_text` only when a short lead paragraph is genuinely needed.
+
+EXECUTIVE COPY DISCIPLINE: on-slide text must read like a Gamma/consulting deck, not a document. Slide titles: 6 words or fewer, an assertion not a label (e.g. "Legacy Systems Can't Scale" not "Legacy System Challenges"). Bullets: 10 words or fewer each, phrase fragments, never full sentences. If a point needs more than that to land, it belongs in `speaker_notes`, not on the slide.
 
 Also assemble `full_script`: the entire narration concatenated in slide order, reading as one seamless consultant presentation from opening hook to closing call-to-action.
 

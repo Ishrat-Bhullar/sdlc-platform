@@ -389,11 +389,14 @@ class ReviewResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ProviderConfigOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
     id: int
     project_id: int
     provider_name: str
     enabled: bool
+    base_url: str | None = None
+    model: str | None = None
+    api_version: str | None = None
     # encrypted_key is intentionally NEVER echoed back
 
 class ProviderListOut(BaseModel):
@@ -402,10 +405,14 @@ class ProviderListOut(BaseModel):
 
 
 class ProviderConfigureRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     project_id: int
     provider_name: str
     api_key: str
     enabled: bool = True
+    base_url: str | None = None      # required for azure_openai / openai_compatible
+    model: str | None = None
+    api_version: str | None = None   # azure_openai only
 
 
 class ProviderConfigureOut(BaseModel):

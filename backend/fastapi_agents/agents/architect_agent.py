@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pydantic import BaseModel, model_validator
-from .llm_client import OllamaClient, call_and_validate
+from .llm_service import LLMService
 
 
 def _first_present(d: dict, *keys: str, default=""):
@@ -152,15 +152,14 @@ Generate the architecture output now.
 
 
 class ArchitectAgent:
-    def __init__(self, client: OllamaClient | None = None):
-        self.client = client or OllamaClient()
+    def __init__(self, llm: LLMService | None = None, *, db=None, project_id: int | None = None):
+        self.llm = llm or LLMService(db=db, project_id=project_id, role="architect")
 
     def run(self, context: str) -> ArchitectAgentOutput:
         if not context.strip():
             raise ValueError("Architecture context cannot be empty")
 
-        result = call_and_validate(
-            client=self.client,
+        result = self.llm.generate_json(
             system=ARCHITECT_AGENT_SYSTEM_PROMPT,
             prompt=build_architecture_prompt(context),
             schema=ArchitectAgentOutput,

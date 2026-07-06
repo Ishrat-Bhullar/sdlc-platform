@@ -75,6 +75,7 @@ THEMES: dict[str, dict[str, Any]] = {
     # ── Authentic EY (light canvas, charcoal + yellow) — flagship ──────────
     "ey": {
         "label": "EY Consulting",
+        "image_palette": "EY yellow and charcoal enterprise consulting",
         "mode": "light",
         "bg": "FFFFFF",
         "bg2": "F6F6FA",          # panel / card fill
@@ -100,6 +101,7 @@ THEMES: dict[str, dict[str, Any]] = {
     # ── EY dark (charcoal canvas) — for on-screen / video hero decks ───────
     "ey_dark": {
         "label": "EY Dark",
+        "image_palette": "EY yellow and dark charcoal enterprise consulting",
         "mode": "dark",
         "bg": "2E2E38",
         "bg2": "3A3A45",
@@ -125,6 +127,7 @@ THEMES: dict[str, dict[str, Any]] = {
     # ── EY light (kept for back-compat; now points at authentic palette) ───
     "ey_light": {
         "label": "EY Light",
+        "image_palette": "EY yellow and charcoal enterprise consulting",
         "mode": "light",
         "bg": "FFFFFF",
         "bg2": "F6F6FA",
@@ -150,6 +153,7 @@ THEMES: dict[str, dict[str, Any]] = {
     # ── McKinsey deep blue ─────────────────────────────────────────────────
     "mckinsey": {
         "label": "Deep Blue",
+        "image_palette": "deep navy blue and white corporate consulting",
         "mode": "light",
         "bg": "FFFFFF",
         "bg2": "EEF3F8",
@@ -172,6 +176,84 @@ THEMES: dict[str, dict[str, Any]] = {
         "info": "2251FF",
         "chart_series": ["2251FF", "051C2C", "00A9F4", "1F9D55", "C77700", "6A7580"],
     },
+    # ── Government / public sector (navy + gold, formal) ───────────────────
+    "government": {
+        "label": "Government",
+        "image_palette": "navy blue and gold official government",
+        "mode": "light",
+        "bg": "FFFFFF",
+        "bg2": "F1F3F6",
+        "bg3": "0B2447",          # deep official navy
+        "accent": "B08D57",       # muted gold/bronze seal accent
+        "accent2": "0B2447",
+        "accent3": "5C6B7A",
+        "title_text": "0B2447",
+        "body_text": "2B333B",
+        "muted": "5C6B7A",
+        "hairline": "D7DCE2",
+        "on_dark": "FFFFFF",
+        "on_accent": "0B2447",
+        "table_hdr": "0B2447",
+        "table_hdr_text": "FFFFFF",
+        "table_alt": "EEF1F5",
+        "success": "1E7D46",
+        "warning": "B7791F",
+        "danger": "9B2226",
+        "info": "1D5B9B",
+        "chart_series": ["B08D57", "0B2447", "1D5B9B", "1E7D46", "B7791F", "5C6B7A"],
+    },
+    # ── Startup (bold, high-contrast, gradient-friendly) ────────────────────
+    "startup": {
+        "label": "Startup",
+        "image_palette": "electric violet and dark modern startup",
+        "mode": "dark",
+        "bg": "0F0F1A",
+        "bg2": "181828",
+        "bg3": "0A0A14",
+        "accent": "7C5CFF",       # electric violet
+        "accent2": "00E0B8",      # mint/teal secondary accent
+        "accent3": "8A8AA3",
+        "title_text": "FFFFFF",
+        "body_text": "D6D6E6",
+        "muted": "8A8AA3",
+        "hairline": "2E2E45",
+        "on_dark": "FFFFFF",
+        "on_accent": "0F0F1A",
+        "table_hdr": "7C5CFF",
+        "table_hdr_text": "FFFFFF",
+        "table_alt": "181828",
+        "success": "00E0B8",
+        "warning": "FFB020",
+        "danger": "FF5C7A",
+        "info": "5CA8FF",
+        "chart_series": ["7C5CFF", "00E0B8", "5CA8FF", "FFB020", "FF5C7A", "8A8AA3"],
+    },
+    # ── Healthcare (calming blue/green/white) ───────────────────────────────
+    "healthcare": {
+        "label": "Healthcare",
+        "image_palette": "teal and white clean healthcare",
+        "mode": "light",
+        "bg": "FFFFFF",
+        "bg2": "F0F7F6",
+        "bg3": "0E6E5C",          # calming teal-green
+        "accent": "0E6E5C",
+        "accent2": "2B8FBF",      # soft clinical blue
+        "accent3": "6B8A85",
+        "title_text": "173F3A",
+        "body_text": "2E4A45",
+        "muted": "6B8A85",
+        "hairline": "D9E8E4",
+        "on_dark": "FFFFFF",
+        "on_accent": "FFFFFF",
+        "table_hdr": "0E6E5C",
+        "table_hdr_text": "FFFFFF",
+        "table_alt": "EAF4F2",
+        "success": "2E9E5B",
+        "warning": "D98C2B",
+        "danger": "C0392B",
+        "info": "2B8FBF",
+        "chart_series": ["0E6E5C", "2B8FBF", "2E9E5B", "D98C2B", "6B8A85", "C0392B"],
+    },
 }
 
 DEFAULT_THEME = "ey"
@@ -186,7 +268,8 @@ def get_theme(theme_id: str | None) -> dict[str, Any]:
     alias = {
         "ey_theme": "ey", "ey_consulting": "ey", "consulting": "ey",
         "dark": "ey_dark", "light": "ey", "deep_blue": "mckinsey",
-        "mckinsey_blue": "mckinsey",
+        "mckinsey_blue": "mckinsey", "public_sector": "government",
+        "gov": "government", "health": "healthcare", "medical": "healthcare",
     }
     tid = alias.get(tid, tid)
     return THEMES.get(tid, THEMES[DEFAULT_THEME])

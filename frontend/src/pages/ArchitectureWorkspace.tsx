@@ -34,19 +34,56 @@ import {
 } from 'lucide-react';
 import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
-import { ArchitectureDiagramViewer, DiagramData } from '../components/ArchitectureDiagramViewer';
+import { ArchitectureDiagramViewer, DiagramData, sanitizeMermaidSource } from '../components/ArchitectureDiagramViewer';
 import { getSelectedProjectId } from '../lib/projectContext';
 import { buildApiUrl, fastApiRequest } from '../lib/api';
-import type { ArchitectureContent } from '../types/unified';
+import { useToast } from '../components/ui/Toast';
+import type { Approval, ArchitectureContent } from '../types/unified';
 
 export function ArchitectureWorkspace() {
   const [activeTab, setActiveTab] = useState<'system' | 'component' | 'sequence' | 'class' | 'er' | 'deployment' | 'dataflow' | 'infrastructure' | 'network' | 'decisions'>('system');
   const [showJsonViewer, setShowJsonViewer] = useState(false);
   const [copied, setCopied] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
+  const [architectureApproval, setArchitectureApproval] = useState<Approval | null>(null);
+  const [approving, setApproving] = useState(false);
+  const { addToast } = useToast();
 
   const projectId = getSelectedProjectId();
   const { getArchitecture, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
+
+  const loadApproval = async () => {
+    if (!projectId) { setArchitectureApproval(null); return; }
+    try {
+      const approvals = await fastApiRequest<Approval[]>(`/projects/${projectId}/approvals`);
+      setArchitectureApproval(approvals.find((a) => a.artifact_type === 'architecture_diagram') || null);
+    } catch (e) {
+      console.error('Failed to load architecture approval status:', e);
+      setArchitectureApproval(null);
+    }
+  };
+
+  useEffect(() => {
+    loadApproval();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
+  const handleApproveArchitecture = async () => {
+    if (!projectId || !architectureApproval) return;
+    setApproving(true);
+    try {
+      await fastApiRequest(`/projects/${projectId}/approvals/${architectureApproval.id}/decide`, {
+        method: 'POST',
+        body: { decision: 'Approved' },
+      });
+      await loadApproval();
+      addToast('Architecture approved', 'success');
+    } catch (e) {
+      addToast(e instanceof Error ? e.message : 'Failed to approve architecture', 'error');
+    } finally {
+      setApproving(false);
+    }
+  };
 
   const handleRegenerateDiagrams = async () => {
     if (!projectId) return;
@@ -70,8 +107,17 @@ export function ArchitectureWorkspace() {
   const lastGenerated = new Date();
 
   const designDecisions = useMemo(() => {
-    if (!archData) return [] as any[];
-    return [] as any[];
+    if (!archData?.architecture_decisions) return [] as any[];
+    // Real backend shape has no per-decision approval state (these are
+    // recorded ADR-style entries, not individually approved/pending) —
+    // labeled 'recorded' rather than fabricating an approved/pending status.
+    return archData.architecture_decisions.map((d, i) => ({
+      id: i,
+      title: d.decision,
+      rationale: d.rationale,
+      tradeoffs: d.consequences,
+      status: 'recorded',
+    }));
   }, [archData]);
 
   const techRecommendations = useMemo(() => {
@@ -182,10 +228,22 @@ export function ArchitectureWorkspace() {
           <span className="rounded-lg bg-ey-yellow/10 px-3 py-1.5 text-xs font-medium text-ey-yellow">
             {architectureVersion}
           </span>
-          <button className="btn-primary text-sm">
-            <ThumbsUp className="mr-2 h-4 w-4" />
-            Approve Architecture
-          </button>
+          {architectureApproval?.status === 'Approved' ? (
+            <StatusBadge status="success">
+              <CheckCircle2 className="mr-1 h-3 w-3" />
+              Approved
+            </StatusBadge>
+          ) : (
+            <button
+              className="btn-primary text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={handleApproveArchitecture}
+              disabled={approving || !architectureApproval}
+              title={!architectureApproval ? 'No pending architecture approval for this project' : undefined}
+            >
+              <ThumbsUp className="mr-2 h-4 w-4" />
+              {approving ? 'Approving…' : 'Approve Architecture'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -242,13 +300,18 @@ export function ArchitectureWorkspace() {
               {/* Architecture Diagrams — unified Mermaid rendering */}
               {activeTab !== 'decisions' && (() => {
                 const TYPE_MAP: Record<string, { keys: string[]; label: string }> = {
+                  // Some `keys` entries cover multiple diagram-type vocabularies the
+                  // architect agent has used over time — 'container' and 'workflow'
+                  // are the current agent's C4-style/process-diagram type names,
+                  // which previously had no matching tab at all (diagrams existed
+                  // in the data but were unreachable in the UI).
                   system: { keys: ['high_level', 'system_context', 'system'], label: 'High-Level Architecture' },
-                  component: { keys: ['component'], label: 'Component Diagram' },
+                  component: { keys: ['component', 'container'], label: 'Component Diagram' },
                   sequence: { keys: ['sequence', 'sequence_login'], label: 'Sequence Diagram' },
                   class: { keys: ['class'], label: 'Class Diagram' },
                   er: { keys: ['er', 'erd', 'entity'], label: 'Entity Relationship Diagram' },
                   deployment: { keys: ['deployment'], label: 'Deployment Diagram' },
-                  dataflow: { keys: ['dataflow', 'data_flow'], label: 'Data Flow Diagram' },
+                  dataflow: { keys: ['dataflow', 'data_flow', 'workflow'], label: 'Data Flow Diagram' },
                   infrastructure: { keys: ['infrastructure', 'infra'], label: 'Infrastructure Diagram' },
                   network: { keys: ['network'], label: 'Network Diagram' },
                 };
@@ -505,7 +568,7 @@ export function ArchitectureWorkspace() {
                       <div key={decision.id} className="rounded-lg bg-dark-bg p-4">
                         <div className="flex items-start justify-between mb-2">
                           <h4 className="text-sm font-semibold text-text-primary">{decision.title}</h4>
-                          <StatusBadge status={decision.status === 'approved' ? 'success' : 'pending'}>
+                          <StatusBadge status="info">
                             {decision.status}
                           </StatusBadge>
                         </div>
@@ -578,26 +641,22 @@ export function ArchitectureWorkspace() {
                 </div>
               </Card>
 
-              {/* Tradeoff Analysis */}
+              {/* Trade-offs — real consequences pulled from architecture_decisions
+                  (the agent's own ADR-style records), not fabricated scores */}
               <Card>
-                <h3 className="section-title">Tradeoff Analysis</h3>
-                <div className="space-y-2">
-                  <div className="flex justify-between text-xs">
-                    <span className="text-text-muted">Complexity vs Scalability</span>
-                    <span className="text-ey-yellow">Balanced</span>
+                <h3 className="section-title">Key Trade-offs</h3>
+                {designDecisions.length === 0 ? (
+                  <p className="text-xs text-text-muted">No architecture decisions recorded yet.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {designDecisions.slice(0, 3).map((decision) => (
+                      <div key={decision.id}>
+                        <p className="text-xs font-medium text-text-primary">{decision.title}</p>
+                        <p className="text-[11px] text-text-muted mt-0.5">{decision.tradeoffs}</p>
+                      </div>
+                    ))}
                   </div>
-                  <ProgressBar value={60} color="yellow" />
-                  <div className="flex justify-between text-xs mt-3">
-                    <span className="text-text-muted">Cost vs Performance</span>
-                    <span className="text-status-success">Optimized</span>
-                  </div>
-                  <ProgressBar value={80} color="green" />
-                  <div className="flex justify-between text-xs mt-3">
-                    <span className="text-text-muted">Flexibility vs Simplicity</span>
-                    <span className="text-status-info">Flexible</span>
-                  </div>
-                  <ProgressBar value={70} color="blue" />
-                </div>
+                )}
               </Card>
 
               {/* Actions */}
@@ -667,7 +726,7 @@ function MermaidChart({ source, id }: { source: string; id: string }) {
           flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' },
         });
         const renderId = 'mmd-' + id + '-' + Math.random().toString(36).slice(2, 8);
-        const { svg: out } = await mermaid.default.render(renderId, source);
+        const { svg: out } = await mermaid.default.render(renderId, sanitizeMermaidSource(source));
         if (!cancelled) setSvg(out);
       } catch (e: any) {
         if (!cancelled) setErr(e?.message || 'Failed to render diagram');

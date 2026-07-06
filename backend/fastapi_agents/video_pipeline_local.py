@@ -29,9 +29,35 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# ── torchvision/basicsr compatibility shim ──────────────────────────────────
+# `basicsr` (an unmaintained transitive dependency pulled in by gfpgan, which
+# SadTalker's optional face-restoration enhancer uses) still does
+# `from torchvision.transforms.functional_tensor import rgb_to_grayscale` — a
+# module path torchvision removed in newer releases (the function moved to
+# torchvision.transforms.functional, unchanged). Rather than downgrading
+# torchvision project-wide to satisfy one legacy import, register a shim
+# module in sys.modules before anything imports basicsr/gfpgan, so the import
+# resolves without touching the installed torchvision package itself.
+def _patch_torchvision_functional_tensor() -> None:
+    import sys
+    import types
+
+    if "torchvision.transforms.functional_tensor" in sys.modules:
+        return
+    try:
+        from torchvision.transforms import functional as _tv_functional
+    except ImportError:
+        return  # torchvision not installed — nothing to patch
+    shim = types.ModuleType("torchvision.transforms.functional_tensor")
+    shim.rgb_to_grayscale = _tv_functional.rgb_to_grayscale
+    sys.modules["torchvision.transforms.functional_tensor"] = shim
+
+
+_patch_torchvision_functional_tensor()
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -147,6 +173,61 @@ THEMES: Dict[str, Dict[str, Any]] = {
         "success_color": (80, 200, 120),
         "warning_color": (255, 165,  0),
         "info_color":    (100, 160, 255),
+    },
+    # These three mirror theme_engine.py's government/startup/healthcare
+    # palettes (same hex values, converted to RGB tuples) so a theme chosen
+    # in the frontend renders consistently in both the downloadable .pptx
+    # (pptx_builder.py, via theme_engine.py) and the rendered video (here) —
+    # this dict is otherwise a separate, independent set of theme
+    # definitions from theme_engine.py's, so new themes must be added here
+    # too or they silently fall back to ey_dark in video renders only.
+    "government": {
+        "label": "Government",
+        "bg":            (255, 255, 255),
+        "accent":        (176, 141,  87),
+        "title_color":   (11,   36,  71),
+        "body_color":    (43,   51,  59),
+        "muted_color":   (92,  107, 122),
+        "bar_color":     (11,   36,  71),
+        "footer_color":  (238, 241, 245),
+        "stripe_color":  (241, 243, 246),
+        "table_header":  (11,   36,  71),
+        "table_alt":     (238, 241, 245),
+        "success_color": (30,  125,  70),
+        "warning_color": (183, 121,  31),
+        "info_color":    (29,   91, 155),
+    },
+    "startup": {
+        "label": "Startup",
+        "bg":            (15,   15,  26),
+        "accent":        (124,  92, 255),
+        "title_color":   (255, 255, 255),
+        "body_color":    (214, 214, 230),
+        "muted_color":   (138, 138, 163),
+        "bar_color":     (124,  92, 255),
+        "footer_color":  (24,   24,  40),
+        "stripe_color":  (24,   24,  40),
+        "table_header":  (124,  92, 255),
+        "table_alt":     (24,   24,  40),
+        "success_color": (0,   224, 184),
+        "warning_color": (255, 176,  32),
+        "info_color":    (92,  168, 255),
+    },
+    "healthcare": {
+        "label": "Healthcare",
+        "bg":            (255, 255, 255),
+        "accent":        (14,  110,  92),
+        "title_color":   (23,   63,  58),
+        "body_color":    (46,   74,  69),
+        "muted_color":   (107, 138, 133),
+        "bar_color":     (14,  110,  92),
+        "footer_color":  (240, 247, 246),
+        "stripe_color":  (234, 244, 242),
+        "table_header":  (14,  110,  92),
+        "table_alt":     (234, 244, 242),
+        "success_color": (46,  158,  91),
+        "warning_color": (217, 140,  43),
+        "info_color":    (43,  143, 191),
     },
 }
 
@@ -1308,6 +1389,8 @@ class FFmpegComposer:
         progress_cb: Optional[Callable[[int, str], None]] = None,
         durations: Optional[List[float]] = None,
         motion: bool = True,
+        slide_pngs_open: Optional[List[Optional[Path]]] = None,
+        motion_styles: Optional[List[str]] = None,
     ) -> Path:
         if len(slide_pngs) != len(slide_wavs):
             raise ValueError("PNG/WAV count mismatch")
@@ -1324,8 +1407,20 @@ class FFmpegComposer:
                 dur = None
                 if durations and i < len(durations):
                     dur = durations[i]
+                png_open = slide_pngs_open[i] if slide_pngs_open and i < len(slide_pngs_open) else None
+                if png_open is not None:
+                    # Cartoon presenter: animate mouth open/closed in sync
+                    # with the narration's volume instead of a static hold.
+                    try:
+                        self._make_clip_animated_mouth(png, png_open, wav, clip, duration=dur)
+                        clip_paths.append(clip)
+                        continue
+                    except Exception as exc:
+                        logger.warning("[FFmpegComposer] Animated mouth failed for slide %d (%s); "
+                                       "falling back to static presenter", i + 1, exc)
+                style = motion_styles[i] if motion_styles and i < len(motion_styles) else "fade"
                 self._make_clip(png, wav, clip, duration=dur, motion=motion,
-                                direction=i % 4)
+                                direction=i % 4, motion_style=style)
                 clip_paths.append(clip)
 
             if progress_cb:
@@ -1336,9 +1431,82 @@ class FFmpegComposer:
 
         return out_path
 
+    def _make_clip_animated_mouth(self, png_closed: Path, png_open: Path, wav: Path, out: Path,
+                                  duration: Optional[float] = None) -> None:
+        """Builds a slide clip whose presenter's mouth switches between the
+        closed/open frames in time with the narration's volume envelope
+        (see _compute_mouth_segments). No Ken-Burns zoom on this path — the
+        zoom transform would need to apply identically across frame swaps to
+        stay aligned, which isn't worth the complexity for a cartoon
+        presenter; a plain scaled hold reads fine and keeps the mouth sync
+        exact."""
+        segments = _compute_mouth_segments(wav)
+        audio_dur = _get_audio_duration(wav)
+        hold = max(duration or 0.0, audio_dur + 0.6, 3.0)
+
+        # Pad/trim the segment list to exactly cover `hold` seconds so the
+        # video doesn't freeze on the last audio frame while the hold continues.
+        total_seg = sum(d for d, _ in segments)
+        if total_seg < hold:
+            segments = segments + [(hold - total_seg, "closed")]
+
+        list_path = out.parent / f"{out.stem}_frames.txt"
+        with open(list_path, "w") as f:
+            for dur_s, state in segments:
+                src = png_open if state == "open" else png_closed
+                f.write(f"file '{src.resolve()}'\n")
+                f.write(f"duration {dur_s:.3f}\n")
+            # Concat demuxer requires the last file repeated without a
+            # trailing duration line to avoid truncating the final segment.
+            last_src = png_open if segments[-1][1] == "open" else png_closed
+            f.write(f"file '{last_src.resolve()}'\n")
+
+        rw, rh = self.resolution
+        fps = int(self.fps)
+        fade = 0.4
+        vf = (
+            f"scale={rw}:{rh},fps={fps},"
+            f"fade=t=in:st=0:d={fade},"
+            f"fade=t=out:st={max(hold - fade, 0):.2f}:d={fade}"
+        )
+
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "concat", "-safe", "0", "-i", str(list_path),
+                    "-i", str(wav),
+                    "-vf", vf,
+                    "-c:v", "libx264", "-preset", "medium",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-pix_fmt", "yuv420p",
+                    "-t", f"{hold:.2f}",
+                    "-shortest",
+                    str(out),
+                ],
+                check=True, capture_output=True, timeout=120,
+            )
+        finally:
+            list_path.unlink(missing_ok=True)
+
+    # Per-slide Ken-Burns intensity, keyed by animation_planner.SlideTransition.
+    # transition_type. This is an honest, whole-frame zoom/pan variation —
+    # ffmpeg's zoompan filter has no notion of "this card" within a static
+    # PNG, so "zoom on important elements"/"highlight important cards" is
+    # approximated as a stronger/snappier push-in on the whole frame, not
+    # true region-targeted zooming. Transition types with no meaningful
+    # motion distinction (fade/push/wipe/cut/morph) keep the original 1.06
+    # gentle default.
+    _MOTION_STYLE_ZOOM = {
+        "zoom": 1.12,               # slides with a hero_image — stronger push-in
+        "reveal": 1.08,             # step-reveal content — a bit more pronounced than default
+        "progressive_diagram": 1.08,
+        "highlight": 1.15,          # key-stat/quote moments — the snappiest zoom
+    }
+
     def _make_clip(self, png: Path, wav: Path, out: Path,
                    duration: Optional[float] = None, motion: bool = True,
-                   direction: int = 0) -> None:
+                   direction: int = 0, motion_style: str = "fade") -> None:
         # Resolve hold time: narration length, floored by a readable minimum.
         try:
             audio_dur = _get_audio_duration(wav)
@@ -1351,9 +1519,10 @@ class FFmpegComposer:
 
         vf_parts: List[str] = []
         if motion:
-            # Gentle Ken-Burns: zoom 1.00 → ~1.06 with a slow directional drift.
+            # Gentle Ken-Burns: zoom 1.00 → ~1.06 by default, stronger for
+            # content-aware motion_style values (see _MOTION_STYLE_ZOOM).
             # Oversample first so the zoom stays crisp (no shimmer).
-            z_end = 1.06
+            z_end = self._MOTION_STYLE_ZOOM.get(motion_style, 1.06)
             zexpr = f"min(zoom+{(z_end - 1.0) / frames:.6f},{z_end})"
             # Alternate pan origin for visual variety between slides.
             pan = [
@@ -1445,7 +1614,7 @@ AVATAR_SOURCE_MAP: Dict[str, list] = {
     "minister":            ["full_body_1.png"],
     "chief_minister":      ["full_body_1.png"],
     "prime_minister":      ["full_body_2.png"],
-    "farmer":              ["people_0.png"],
+    "farmer":              ["farmer_real.jpg"],
     "village_woman":       ["happy1.png"],
     "factory_worker":      ["people_0.png"],
     "poor_family":         ["happy.png"],
@@ -1539,9 +1708,11 @@ class SadTalkerAvatarService:
 
     # SadTalker renders at roughly this many seconds of wall-clock time per
     # second of driven audio on typical local hardware (CPU / Apple MPS) —
-    # measured ~16x on an M-series Mac with the (default-off) enhancer
-    # disabled. Kept with headroom above the measured value.
-    SECONDS_PER_AUDIO_SECOND = 20
+    # measured ~16x on an otherwise-idle M-series Mac with the (default-off)
+    # enhancer disabled, but real-world runs compete with other CPU load
+    # (background OS processes, other apps) and can run much slower. Kept
+    # generous so a busy machine doesn't get cut off mid-render.
+    SECONDS_PER_AUDIO_SECOND = 45
     # The (opt-in) gfpgan enhancer adds substantial per-frame overhead on
     # top of that baseline — scale the timeout up automatically when enabled
     # rather than making callers remember to raise it themselves.
@@ -1569,7 +1740,7 @@ class SadTalkerAvatarService:
         if os.getenv("SADTALKER_ENHANCER", "").strip():
             multiplier *= self.ENHANCER_TIMEOUT_MULTIPLIER
         scaled = int(duration * multiplier)
-        return max(900, scaled)
+        return max(1800, scaled)
 
     def generate(
         self,
@@ -1726,8 +1897,14 @@ class CartoonPresenterService:
     downloads. A talking-head lip-sync avatar remains available via the
     "human" presenter (SadTalker); this is the lightweight default."""
 
+    # Personas that get the farmer illustration instead of the default
+    # business-suit presenter — matches the rural-governance avatar options
+    # already offered in the picker (farmer, village_woman).
+    _FARMER_PERSONAS = {"farmer", "village_woman"}
+
     def composite(self, slide_img, theme_id: str, gesture: str = "talk",
-                  hero: bool = False, position: str = "right"):
+                  hero: bool = False, position: str = "right", persona: str = "professional_male",
+                  mouth_state: str = "closed"):
         from PIL import Image, ImageOps
         theme = THEMES.get(theme_id, THEMES["ey"])
         h = SLIDE_H
@@ -1740,7 +1917,10 @@ class CartoonPresenterService:
         pw = int(h * frac)
         ph = int(pw * 1.65)
         gest = gesture
-        presenter = self._draw_presenter(pw, ph, theme, gest)
+        if str(persona).lower() in self._FARMER_PERSONAS:
+            presenter = self._draw_farmer_presenter(pw, ph, theme, gest, mouth_state=mouth_state)
+        else:
+            presenter = self._draw_presenter(pw, ph, theme, gest, mouth_state=mouth_state)
         if str(position).lower() == "left":
             presenter = ImageOps.mirror(presenter)  # face/point toward content
             x = 60 if hero else 18
@@ -1751,7 +1931,7 @@ class CartoonPresenterService:
         base.alpha_composite(presenter, (x, y))
         return base.convert("RGB")
 
-    def _draw_presenter(self, w: int, h: int, theme: dict, gesture: str):
+    def _draw_presenter(self, w: int, h: int, theme: dict, gesture: str, mouth_state: str = "closed"):
         from PIL import Image, ImageDraw
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
@@ -1810,9 +1990,17 @@ class CartoonPresenterService:
         # Eyebrows
         d.line([cx - head_r * 0.58, eye_y - 16, cx - head_r * 0.24, eye_y - 19], fill=hair, width=4)
         d.line([cx + head_r * 0.24, eye_y - 19, cx + head_r * 0.58, eye_y - 16], fill=hair, width=4)
-        # Friendly confident smile
-        d.arc([cx - head_r * 0.4, eye_y + 6, cx + head_r * 0.4, eye_y + head_r * 0.55],
-              15, 165, fill=(150, 90, 80), width=4)
+        # Mouth — amplitude-driven "talking" state: an open oval when the
+        # narration audio is loud at this instant, a closed smile otherwise.
+        # Not phoneme-accurate lip-sync, but reads as talking vs. silent.
+        if mouth_state == "open":
+            d.ellipse([cx - head_r * 0.22, eye_y + head_r * 0.28, cx + head_r * 0.22, eye_y + head_r * 0.58],
+                      fill=(120, 60, 55))
+            d.ellipse([cx - head_r * 0.14, eye_y + head_r * 0.32, cx + head_r * 0.14, eye_y + head_r * 0.46],
+                      fill=(210, 90, 90))
+        else:
+            d.arc([cx - head_r * 0.4, eye_y + 6, cx + head_r * 0.4, eye_y + head_r * 0.55],
+                  15, 165, fill=(150, 90, 80), width=4)
 
         # ── Arms / gesture ───────────────────────────────────────────────────
         arm_w = int(w * 0.13)
@@ -1835,6 +2023,167 @@ class CartoonPresenterService:
                fill=suit, width=arm_w)
         hx2, hy2 = cx + w * 0.30, sh_top + h * 0.35
         d.ellipse([hx2 - 12, hy2 - 12, hx2 + 12, hy2 + 12], fill=skin)
+
+        return img
+
+    def _draw_farmer_presenter(self, w: int, h: int, theme: dict, gesture: str, mouth_state: str = "closed"):
+        """Rural-governance persona: turban, mustache, kurta, dhoti, holding a
+        wheat sheaf — same flat, hand-drawn illustration style as the default
+        presenter, just a different figure, so it fits Panchayati Raj / rural
+        stakeholder contexts (farmer, village_woman personas)."""
+        import math as _math
+        from PIL import Image, ImageDraw
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+
+        charcoal = (46, 46, 56)
+        turban = (232, 178, 58)       # mustard/saffron turban
+        turban_sh = (203, 148, 36)
+        turban_hi = (247, 202, 92)
+        kurta = (247, 243, 231)       # cream kurta
+        kurta_sh = (222, 216, 198)
+        dhoti = (150, 108, 66)        # earthy brown dhoti
+        dhoti_sh = (124, 86, 48)
+        skin = (196, 148, 108)
+        skin_sh = (172, 124, 88)
+        hair = (40, 32, 28)
+        wheat = (224, 182, 78)
+        wheat_dark = (196, 150, 54)
+        stalk = (104, 144, 82)
+
+        cx = w // 2
+        d.ellipse([cx - w * 0.34, h - h * 0.04, cx + w * 0.34, h], fill=(0, 0, 0, 40))
+
+        # ── Dhoti — voluminous, balloons out at the hip then tapers to a
+        # cinched ankle before the bare foot, unlike straight trousers ──────
+        sh_top = int(h * 0.42)
+        hip_y = sh_top + h * 0.20
+        knee_y = sh_top + h * 0.52
+        ankle_y = h - h * 0.06
+        for side in (-1, 1):
+            d.polygon([
+                (cx + side * w * 0.03, hip_y),
+                (cx + side * w * 0.30, hip_y + h * 0.06),
+                (cx + side * w * 0.26, knee_y),
+                (cx + side * w * 0.15, ankle_y),
+                (cx + side * w * 0.05, ankle_y),
+                (cx + side * w * 0.02, knee_y),
+            ], fill=dhoti)
+            d.polygon([
+                (cx + side * w * 0.30, hip_y + h * 0.06),
+                (cx + side * w * 0.26, knee_y),
+                (cx + side * w * 0.22, knee_y + 4),
+                (cx + side * w * 0.27, hip_y + h * 0.08),
+            ], fill=dhoti_sh)
+        d.polygon([(cx - w * 0.11, sh_top + h * 0.16), (cx + w * 0.11, sh_top + h * 0.16),
+                   (cx + w * 0.15, hip_y + 6), (cx - w * 0.15, hip_y + 6)], fill=dhoti_sh)
+        # Bare feet (visible toes)
+        for side in (-1, 1):
+            fx = cx + side * w * 0.10
+            d.ellipse([fx - w * 0.075, ankle_y - 6, fx + w * 0.075, h + 2], fill=skin_sh)
+            for t in range(3):
+                tx = fx - w * 0.045 + t * w * 0.045
+                d.ellipse([tx - 3, h - 6, tx + 3, h + 2], fill=skin)
+
+        # ── Kurta (collarless, button placket, rolled sleeves) ───────────────
+        d.rounded_rectangle([cx - w * 0.33, sh_top, cx + w * 0.33, sh_top + h * 0.36],
+                            radius=int(w * 0.17), fill=kurta)
+        d.line([(cx, sh_top + 4), (cx, sh_top + h * 0.32)], fill=kurta_sh, width=3)
+        for by in (0.09, 0.18, 0.27):
+            d.ellipse([cx - 3, sh_top + h * by - 3, cx + 3, sh_top + h * by + 3], fill=kurta_sh)
+
+        # ── Neck + head ───────────────────────────────────────────────────────
+        neck_w = w * 0.10
+        d.rectangle([cx - neck_w, sh_top - h * 0.05, cx + neck_w, sh_top + 6], fill=skin_sh)
+        head_r = w * 0.19
+        head_cy = int(h * 0.23)
+        d.ellipse([cx - head_r, head_cy - head_r * 0.95, cx + head_r, head_cy + head_r * 1.15],
+                  fill=skin)
+        d.ellipse([cx - head_r - 5, head_cy - 4, cx - head_r + 9, head_cy + 16], fill=skin)
+        d.ellipse([cx + head_r - 9, head_cy - 4, cx + head_r + 5, head_cy + 16], fill=skin)
+
+        # Turban — big rounded dome sitting high, with horizontal wrap bands
+        # confined to the dome (never crossing onto the face) and a side
+        # puff/knot, matching a traditional pagri silhouette.
+        turb_top = head_cy - head_r * 1.85
+        turb_bottom = head_cy - head_r * 0.25   # dome's lower edge — stays above the eyeline
+        turb_l, turb_r = cx - head_r * 1.25, cx + head_r * 1.25
+        d.ellipse([turb_l, turb_top, turb_r, head_cy + head_r * 0.15], fill=turban)
+        # Wrap folds — evenly spaced horizontal bands confined between the
+        # dome's top and its lower edge, so they never reach the face.
+        band_span = turb_bottom - (turb_top + head_r * 0.35)
+        for k in range(4):
+            yy = turb_top + head_r * 0.35 + band_span * (k / 3)
+            inset = head_r * 0.15 * (1 - abs(k - 1.5) / 1.5)
+            d.arc([turb_l + 4 + inset, yy - head_r * 0.22, turb_r - 4 - inset, yy + head_r * 0.22],
+                  10, 170, fill=turban_sh, width=3)
+        d.arc([turb_l + head_r * 0.15, turb_top, turb_r - head_r * 0.15, turb_top + head_r * 0.9],
+              200, 340, fill=turban_hi, width=4)
+        # Side puff / knot, tucked above the ear
+        d.ellipse([cx + head_r * 0.65, turb_top - head_r * 0.08, cx + head_r * 1.25, turb_top + head_r * 0.42],
+                  fill=turban_sh)
+        d.ellipse([cx + head_r * 0.75, turb_top + head_r * 0.02, cx + head_r * 1.12, turb_top + head_r * 0.3],
+                  fill=turban)
+
+        # Eyes
+        eye_y = head_cy + head_r * 0.05
+        for ex in (cx - head_r * 0.40, cx + head_r * 0.40):
+            d.ellipse([ex - 8, eye_y - 6, ex + 8, eye_y + 6], fill=(255, 255, 255))
+            d.ellipse([ex - 3.5, eye_y - 3.5, ex + 3.5, eye_y + 3.5], fill=charcoal)
+        d.line([cx - head_r * 0.56, eye_y - 15, cx - head_r * 0.22, eye_y - 18], fill=hair, width=3)
+        d.line([cx + head_r * 0.22, eye_y - 18, cx + head_r * 0.56, eye_y - 15], fill=hair, width=3)
+
+        # Mustache — thick, with curled ends (the defining rural-presenter feature)
+        must_y = eye_y + head_r * 0.55
+        d.arc([cx - head_r * 0.55, must_y - 10, cx, must_y + 12], 195, 360, fill=hair, width=8)
+        d.arc([cx, must_y - 10, cx + head_r * 0.55, must_y + 12], 180, 345, fill=hair, width=8)
+        d.ellipse([cx - head_r * 0.58, must_y - 2, cx - head_r * 0.44, must_y + 10], fill=hair)
+        d.ellipse([cx + head_r * 0.44, must_y - 2, cx + head_r * 0.58, must_y + 10], fill=hair)
+        # Mouth beneath the mustache — amplitude-driven open/closed state
+        # (see _draw_presenter for the same logic on the default persona).
+        if mouth_state == "open":
+            d.ellipse([cx - head_r * 0.18, must_y + 4, cx + head_r * 0.18, must_y + head_r * 0.34],
+                      fill=(110, 55, 50))
+            d.ellipse([cx - head_r * 0.11, must_y + 7, cx + head_r * 0.11, must_y + head_r * 0.21],
+                      fill=(200, 85, 85))
+        else:
+            d.arc([cx - head_r * 0.32, must_y + 6, cx + head_r * 0.32, must_y + head_r * 0.5],
+                  15, 165, fill=(150, 90, 80), width=3)
+
+        # ── Arms + wheat sheaf ────────────────────────────────────────────────
+        arm_w = int(w * 0.12)
+        if gesture == "point":
+            d.line([(cx - w * 0.28, sh_top + h * 0.06), (cx - w * 0.46, sh_top - h * 0.02)],
+                   fill=kurta, width=arm_w)
+            hx, hy = cx - w * 0.47, sh_top - h * 0.03
+            d.ellipse([hx - 11, hy - 11, hx + 11, hy + 11], fill=skin)
+        else:
+            d.line([(cx - w * 0.27, sh_top + h * 0.08), (cx - w * 0.34, sh_top + h * 0.28)],
+                   fill=kurta, width=arm_w)
+            hx, hy = cx - w * 0.35, sh_top + h * 0.30
+            d.ellipse([hx - 12, hy - 12, hx + 12, hy + 12], fill=skin)
+        # Resting arm holding the wheat sheaf against the chest
+        d.line([(cx + w * 0.27, sh_top + h * 0.08), (cx + w * 0.24, sh_top + h * 0.32)],
+               fill=kurta, width=arm_w)
+        hx2, hy2 = cx + w * 0.24, sh_top + h * 0.33
+        d.ellipse([hx2 - 11, hy2 - 11, hx2 + 11, hy2 + 11], fill=skin)
+
+        # Wheat sheaf: a fuller fan of stalks with drooping golden heads,
+        # held prominently in front rather than a thin sprig.
+        for ang in (-32, -16, 0, 16, 32, 46):
+            rad = _math.radians(ang - 92)
+            L = h * (0.26 if abs(ang) < 20 else 0.22)
+            ex = hx2 + L * _math.cos(rad)
+            ey = hy2 + L * _math.sin(rad)
+            d.line([(hx2, hy2), (ex, ey)], fill=stalk, width=3)
+            # Drooping seed head: an elongated ellipse angled along the stalk
+            head_img = Image.new("RGBA", (26, 44), (0, 0, 0, 0))
+            hd = ImageDraw.Draw(head_img)
+            hd.ellipse([4, 0, 22, 40], fill=wheat)
+            hd.ellipse([8, 4, 18, 34], fill=wheat_dark)
+            rotated = head_img.rotate(-ang * 0.6, expand=True, resample=Image.BICUBIC)
+            img.alpha_composite(rotated, (int(ex - rotated.width / 2), int(ey - rotated.height * 0.65)))
+        d.ellipse([hx2 - 9, hy2 - 7, hx2 + 9, hy2 + 11], fill=stalk)  # binding knot
 
         return img
 
@@ -1875,6 +2224,11 @@ class VideoRenderJob:
     fps: int = 30
     captions: bool = False
     motion: bool = True                    # Ken-Burns / camera motion toggle
+    # Additive, independent of `captions` (which burns a caption band onto
+    # slide PNGs) — this produces real downloadable .srt/.vtt sidecar files.
+    generate_subtitle_files: bool = False
+    srt_path: Optional[str] = None
+    vtt_path: Optional[str] = None
     status: str = "queued"  # queued | running | completed | failed
     percent: int = 0
     stage: str = "Queued"
@@ -1891,6 +2245,7 @@ class VideoRenderJob:
     eta_seconds: Optional[float] = None
     fallback_used: bool = False
     avatar_error: Optional[str] = None
+    avatar_provider_used: Optional[str] = None  # "d-id" | "sadtalker" | None if avatar mode wasn't used
 
 
 # Module-level job registry (in-memory, survives request lifecycle)
@@ -1918,13 +2273,18 @@ def create_job(
     fps: int = 30,
     captions: bool = False,
     motion: bool = True,
+    generate_subtitle_files: bool = False,
 ) -> VideoRenderJob:
     job_id = uuid.uuid4().hex
-    # A "human" presenter drives SadTalker lip-sync; everything else renders the
-    # narrated (optionally cartoon-overlaid) slideshow. `mode` is kept in sync
-    # for backward compatibility with existing callers/routes.
-    if presenter_type == "human":
-        mode = "avatar"
+    # presenter_type is the single source of truth for which render path
+    # runs — a "human" presenter drives SadTalker lip-sync (mode="avatar"),
+    # everything else renders the narrated (optionally cartoon-overlaid)
+    # slideshow. Previously `mode` was only forced to "avatar" when
+    # presenter_type=="human" but never reset otherwise, so a stale
+    # mode="avatar" from an earlier request (frontend's `mode`/`presenter_type`
+    # are separate fields that can drift out of sync) would keep running
+    # SadTalker even after switching to Cartoon Presenter. Always derive it.
+    mode = "avatar" if presenter_type == "human" else ("slides" if mode == "avatar" else mode)
     storyboard = [
         StoryboardFrame(slide_idx=i, title=s.get("title", f"Slide {i + 1}"))
         for i, s in enumerate(slides)
@@ -1950,6 +2310,7 @@ def create_job(
         fps=fps,
         captions=captions,
         motion=motion,
+        generate_subtitle_files=generate_subtitle_files,
         storyboard=storyboard,
     )
     with _jobs_lock:
@@ -1994,6 +2355,7 @@ def _run_pipeline_inner(job, db_session_factory, save_artifact_fn):
     composer = FFmpegComposer()
 
     slide_pngs: List[Path] = []
+    slide_pngs_open: List[Optional[Path]] = []  # mouth-open variant, cartoon presenter only
     slide_wavs: List[Path] = []
 
     # ── Phase 1: Render slide images ─────────────────────────────────────
@@ -2024,34 +2386,50 @@ def _run_pipeline_inner(job, db_session_factory, save_artifact_fn):
         job.storyboard[i].status = "rendering"
 
         if hi_frames and i < len(hi_frames):
-            img = hi_frames[i]
+            base_img = hi_frames[i]
         else:
-            img = renderer.render(slide, job.theme_id, i + 1, total)
-        if presenter_svc is not None:
-            # First and last slide get a larger, front-and-centre presenter;
-            # content slides get a smaller presenter standing to the side.
-            layout = slide.get("layout")
-            gesture = "point" if layout in ("architecture", "process", "chart", "timeline", "table", "tech_grid", "roadmap", "comparison") else "talk"
-            # Large "hero" presenter only on spacious layouts; dense content
-            # slides always get the compact corner presenter so it never covers content.
-            hero = layout in ("title", "section", "closing", "quote")
-            img = presenter_svc.composite(img, job.theme_id, gesture=gesture, hero=hero,
-                                          position=job.presenter_position)
-        # Optional burned-in captions — inset on the presenter's side so the
-        # caption band never sits under the presenter figure.
+            base_img = renderer.render(slide, job.theme_id, i + 1, total)
+
+        cap_text = ""
+        cl, cr = 140, 140
         if job.captions:
-            cap = (slide.get("narration") or slide.get("speaker_notes") or "").strip()
-            if cap:
-                cl, cr = 140, 140
-                if presenter_svc is not None:
-                    if str(job.presenter_position).lower() == "left":
-                        cl = 560
-                    else:
-                        cr = 560
-                img = _draw_captions(img, cap, job.theme_id, left=cl, right=cr)
+            cap_text = (slide.get("narration") or slide.get("speaker_notes") or "").strip()
+            if presenter_svc is not None:
+                if str(job.presenter_position).lower() == "left":
+                    cl = 560
+                else:
+                    cr = 560
+
+        def _finish(mouth_state: str):
+            """Composite the presenter (at the given mouth state, if any) and
+            captions onto a fresh copy of the base slide image."""
+            frame = base_img.copy()
+            if presenter_svc is not None:
+                layout = slide.get("layout")
+                gesture = "point" if layout in ("architecture", "process", "chart", "timeline", "table", "tech_grid", "roadmap", "comparison") else "talk"
+                hero = layout in ("title", "section", "closing", "quote")
+                frame = presenter_svc.composite(frame, job.theme_id, gesture=gesture, hero=hero,
+                                                position=job.presenter_position, persona=job.avatar_id,
+                                                mouth_state=mouth_state)
+            if cap_text:
+                frame = _draw_captions(frame, cap_text, job.theme_id, left=cl, right=cr)
+            return frame
+
+        img = _finish("closed")
         png_path = tmp_dir / f"slide_{i:03d}.png"
         renderer.to_png(img, png_path)
         slide_pngs.append(png_path)
+
+        # Cartoon presenter also gets a mouth-open variant so the composer
+        # can animate a simple amplitude-driven "talking" effect — skipped
+        # for other presenter types (human/none), which don't use this frame.
+        if presenter_svc is not None:
+            img_open = _finish("open")
+            png_open_path = tmp_dir / f"slide_{i:03d}_open.png"
+            renderer.to_png(img_open, png_open_path)
+            slide_pngs_open.append(png_open_path)
+        else:
+            slide_pngs_open.append(None)
 
         job.storyboard[i].thumb_b64 = renderer.to_thumbnail_b64(img)
         job.storyboard[i].status = "rendered"
@@ -2072,6 +2450,7 @@ def _run_pipeline_inner(job, db_session_factory, save_artifact_fn):
         emphasis=job.emphasis,
     )
     slide_durations: List[float] = []
+    narration_texts: List[str] = []
 
     for i, slide in enumerate(slides):
         pct = int(40 + (i / total) * 30)
@@ -2100,6 +2479,7 @@ def _run_pipeline_inner(job, db_session_factory, save_artifact_fn):
         hold = max(dur + 0.6, _slide_min_duration(slide))
         slide_durations.append(hold)
         slide_wavs.append(wav_path)
+        narration_texts.append(narration)
         _log(job, f"  ✓ Audio {i + 1}: {dur:.1f}s → hold {hold:.1f}s")
 
     # ── Phase 3: Compose MP4 ──────────────────────────────────────────────
@@ -2117,13 +2497,43 @@ def _run_pipeline_inner(job, db_session_factory, save_artifact_fn):
     _RES = {"720p": (1280, 720), "1080p": (1920, 1080), "1440p": (2560, 1440)}
     composer.fps = int(job.fps or 30)
     composer.resolution = _RES.get(job.resolution, (1920, 1080))
+
+    # Animation Planner: derive a per-slide Ken-Burns motion style from each
+    # slide's layout/hero_image (architecture/process/roadmap -> a stronger
+    # progressive-reveal zoom; a slide with a hero_image -> a push-in zoom).
+    # Every slide's own layout/hero_image is already available on `slides`
+    # (posted from the editor / the presentation pipeline's exported deck),
+    # so no extra LLM call or lookup is needed here.
+    from . import animation_planner as _AP
+    _scenes_for_motion = [
+        {"scene_number": i + 1, "layout": sl.get("layout") or sl.get("visual_suggestions", ""),
+         "hero_image": sl.get("hero_image")}
+        for i, sl in enumerate(slides)
+    ]
+    _transitions = _AP.plan_transitions(_scenes_for_motion)
+    motion_styles = ["fade"] + [t.transition_type for t in _transitions]
+
     composer.compose(slide_pngs, slide_wavs, out_mp4, progress_cb=encode_cb,
-                     durations=slide_durations, motion=job.motion)
+                     durations=slide_durations, motion=job.motion,
+                     slide_pngs_open=slide_pngs_open if presenter_svc is not None else None,
+                     motion_styles=motion_styles)
     job.video_path = str(out_mp4)
     job.duration_seconds = _get_video_duration(out_mp4)
     _log(job, f"Video composed: {job.duration_seconds:.1f}s → {out_mp4.name}")
 
-    # ── Phase 4: Avatar mode (SadTalker lip-sync) ────────────────────────
+    if job.generate_subtitle_files:
+        try:
+            from .services.subtitle_generator import build_cues, write_subtitle_files
+            cues = build_cues(narration_texts, slide_durations)
+            srt_path, vtt_path = write_subtitle_files(cues, VIDEO_OUTPUT_DIR, f"project_{job.project_id}_{job.job_id}")
+            job.srt_path = str(srt_path)
+            job.vtt_path = str(vtt_path)
+            _log(job, f"Subtitle files generated: {srt_path.name}, {vtt_path.name}")
+        except Exception as exc:
+            logger.warning("[VideoPipeline] Subtitle generation failed (non-fatal): %s", exc)
+            _log(job, f"⚠ Subtitle generation skipped: {exc}")
+
+    # ── Phase 4: Avatar mode (D-ID, SadTalker fallback) ──────────────────
     if job.mode == "avatar":
         job.stage = "Generating SadTalker avatar"
         _progress(job, 90, "Concatenating narration audio…")
@@ -2133,22 +2543,45 @@ def _run_pipeline_inner(job, db_session_factory, save_artifact_fn):
         combined_wav = tmp_dir / "combined_narration.wav"
         _concat_audio(slide_wavs, combined_wav)
 
-        _progress(job, 92, "Running SadTalker AI lip-sync (this takes 2–4 min)…")
-        _log(job, "Running SadTalker — real AI talking head with lip-sync")
+        _progress(job, 92, "Rendering AI avatar (D-ID, falling back to local SadTalker if needed)…")
+        _log(job, "Rendering AI avatar — D-ID primary, SadTalker automatic fallback")
 
-        avatar_svc = SadTalkerAvatarService()
+        from .agents.avatar_provider import render_avatar_with_fallback, AvatarRenderError
+
         avatar_out = VIDEO_OUTPUT_DIR / f"avatar_{job.project_id}_{job.job_id}.mp4"
         face_img = avatar_image_for(job.avatar_id)
         _log(job, f"Avatar persona '{job.avatar_id}' → {face_img.name}")
-        result = avatar_svc.generate(combined_wav, avatar_out, avatar_image=face_img)
 
-        if result and result.exists():
-            job.avatar_path = str(result)
-            _log(job, f"✓ SadTalker avatar generated: {result.name}")
-        else:
+        # db_session_factory is a FastAPI generator dependency (get_db), not a
+        # plain callable — must be advanced with next(), same pattern
+        # presentation_routes.py's _save_video_artifacts uses.
+        db_session = next(db_session_factory()) if db_session_factory else None
+        try:
+            render_result = render_avatar_with_fallback(
+                narration_text=" ".join(t for t in narration_texts if t),
+                audio_wav=combined_wav,
+                out_path=avatar_out,
+                avatar_image=face_img,
+                voice_id=job.voice_id,
+                db=db_session,
+                project_id=job.project_id,
+            )
+            job.avatar_path = str(render_result.video_path)
+            job.avatar_provider_used = render_result.provider_used
+            job.fallback_used = render_result.fallback_occurred
+            job.avatar_error = render_result.primary_error
+            _log(job, f"✓ Avatar generated via {render_result.provider_used}"
+                       + (f" (fell back from D-ID: {render_result.primary_error})" if render_result.fallback_occurred else ""))
+        except AvatarRenderError as exc:
+            # Both D-ID (if configured) and SadTalker failed — matches the
+            # pre-existing "SadTalker failed" outcome exactly (no avatar_path,
+            # fallback_used + avatar_error surfaced), just from either provider.
             job.fallback_used = True
-            job.avatar_error = avatar_svc.last_error or "SadTalker failed for an unknown reason"
-            _log(job, f"⚠ SadTalker failed — avatar_path will be None ({job.avatar_error})")
+            job.avatar_error = str(exc)
+            _log(job, f"⚠ Avatar rendering failed — avatar_path will be None ({job.avatar_error})")
+        finally:
+            if db_session is not None:
+                db_session.close()
 
     # ── Phase 5: Persist artifacts ────────────────────────────────────────
     job.stage = "Saving artifacts"
@@ -2224,6 +2657,71 @@ def _get_audio_duration(wav_path: Path) -> float:
         return float(result.stdout.strip())
     except Exception:
         return 3.0
+
+
+def _compute_mouth_segments(wav_path: Path, window_s: float = 0.12) -> List[Tuple[float, str]]:
+    """Amplitude-based "lip sync": splits the narration WAV into short windows
+    and marks each as mouth 'open' or 'closed' based on RMS loudness at that
+    instant. Not phoneme-accurate (that needs a real viseme/ML model), but a
+    mouth that opens while talking and closes during pauses reads as
+    "talking" — enough for a cartoon presenter without SadTalker's cost.
+    Returns a list of (duration_seconds, state) segments covering the whole
+    file; on any failure returns a single 'closed' segment for the full
+    duration so callers can fall back to the static presenter unchanged."""
+    import wave
+    import audioop
+
+    total_duration = _get_audio_duration(wav_path)
+    try:
+        with wave.open(str(wav_path), "rb") as wf:
+            n_channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            framerate = wf.getframerate()
+            n_frames_per_window = max(1, int(framerate * window_s))
+            frames = wf.readframes(wf.getnframes())
+    except Exception:
+        return [(max(total_duration, 0.1), "closed")]
+
+    if not frames or sampwidth not in (1, 2, 3, 4):
+        return [(max(total_duration, 0.1), "closed")]
+
+    bytes_per_frame = sampwidth * n_channels
+    window_bytes = n_frames_per_window * bytes_per_frame
+    rms_values: List[float] = []
+    for start in range(0, len(frames), window_bytes):
+        chunk = frames[start:start + window_bytes]
+        if len(chunk) < bytes_per_frame:
+            break
+        try:
+            rms_values.append(audioop.rms(chunk, sampwidth))
+        except Exception:
+            rms_values.append(0)
+
+    if not rms_values:
+        return [(max(total_duration, 0.1), "closed")]
+
+    # Threshold relative to this clip's own loudness range (not an absolute
+    # constant) so it adapts to quieter/louder narration/voices.
+    peak = max(rms_values) or 1
+    threshold = peak * 0.18
+
+    segments: List[Tuple[float, str]] = []
+    for rms in rms_values:
+        state = "open" if rms > threshold else "closed"
+        if segments and segments[-1][1] == state:
+            idx = len(segments) - 1
+            segments[idx] = (segments[idx][0] + window_s, state)
+        else:
+            segments.append((window_s, state))
+
+    # Reconcile total with the real audio duration (window count is an
+    # approximation) so the mouth animation exactly spans the clip.
+    computed_total = sum(d for d, _ in segments)
+    if computed_total > 0 and total_duration > 0:
+        scale = total_duration / computed_total
+        segments = [(d * scale, s) for d, s in segments]
+
+    return segments or [(max(total_duration, 0.1), "closed")]
 
 
 def _get_video_duration(mp4_path: Path) -> float:

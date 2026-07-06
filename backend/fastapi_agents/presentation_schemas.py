@@ -58,6 +58,11 @@ class PresentationGenerateRequest(BaseModel):
     avatar_config: AvatarConfig = Field(default_factory=AvatarConfig)
     scene_config: SceneConfig = Field(default_factory=SceneConfig)
     language: str = Field(default="en-US")
+    theme_id: str | None = Field(
+        default=None,
+        description="Theme preset id (ey, ey_dark, mckinsey, minimal, government, startup, healthcare). "
+                    "Defaults by persona category when not set."
+    )
 
 
 class PresentationDownloadRequest(BaseModel):

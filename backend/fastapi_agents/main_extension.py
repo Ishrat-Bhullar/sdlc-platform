@@ -69,7 +69,6 @@ from . import agent_runner as _agent_runner
 
 
 from pydantic import BaseModel as _BaseModel
-import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, StreamingResponse
@@ -888,58 +887,6 @@ def documents_by_category(
     return {"category": category, "documents": docs, "count": len(docs)}
 
 
-@router.get("/documents/{document_id}", response_model=DocumentOut, tags=["documents"])
-def get_document(
-    document_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> dict:
-    # Try uploaded documents first, then artifacts
-    doc = db.get(Document, document_id)
-    if doc:
-        p = Path(doc.storage_path)
-        return {
-            "id": doc.id, "project_id": doc.project_id, "file_name": doc.file_name,
-            "document_type": doc.document_type, "storage_path": doc.storage_path,
-            "uploaded_at": doc.uploaded_at,
-            "category": _document_category(doc.document_type),
-            "size_bytes": p.stat().st_size if p.exists() else 0,
-        }
-    art = db.get(GeneratedArtifact, document_id)
-    if art:
-        return _artifact_to_doc_out(art)
-    raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
-
-
-@router.get("/documents/download/{document_id}", tags=["documents"])
-def download_document(
-    document_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    # Uploaded file → serve from disk
-    doc = db.get(Document, document_id)
-    if doc:
-        p = Path(doc.storage_path)
-        if not p.exists():
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found on disk")
-        return FileResponse(path=str(p), filename=doc.file_name, media_type="application/octet-stream")
-
-    # Generated artifact → stream the text content as a .txt/.sql file
-    art = db.get(GeneratedArtifact, document_id)
-    if art:
-        ext = ".sql" if art.artifact_type == ArtifactType.SQL_SCHEMA.value else ".txt"
-        filename = f"{art.artifact_type}_{art.id}{ext}"
-        content_bytes = (art.content or "").encode("utf-8")
-        return StreamingResponse(
-            BytesIO(content_bytes),
-            media_type="text/plain",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
-
-    raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
-
-
 @router.get("/documents/export-artifact", tags=["documents"])
 def export_artifact(
     projectId: int | None = None,
@@ -995,6 +942,64 @@ def export_all_documents(
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="ey_sdlc_export.zip"'},
     )
+
+
+# Static paths above (export-artifact, export-all) MUST be registered before
+# the dynamic /documents/{document_id} below — FastAPI/Starlette matches
+# routes in registration order, so a dynamic path segment declared first
+# would otherwise swallow "export-artifact"/"export-all" as a document_id
+# value (this was a real, previously-unreachable-route bug: both export
+# endpoints below returned 422 int-parsing errors instead of ever running).
+@router.get("/documents/{document_id}", response_model=DocumentOut, tags=["documents"])
+def get_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    # Try uploaded documents first, then artifacts
+    doc = db.get(Document, document_id)
+    if doc:
+        p = Path(doc.storage_path)
+        return {
+            "id": doc.id, "project_id": doc.project_id, "file_name": doc.file_name,
+            "document_type": doc.document_type, "storage_path": doc.storage_path,
+            "uploaded_at": doc.uploaded_at,
+            "category": _document_category(doc.document_type),
+            "size_bytes": p.stat().st_size if p.exists() else 0,
+        }
+    art = db.get(GeneratedArtifact, document_id)
+    if art:
+        return _artifact_to_doc_out(art)
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+
+
+@router.get("/documents/download/{document_id}", tags=["documents"])
+def download_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Uploaded file → serve from disk
+    doc = db.get(Document, document_id)
+    if doc:
+        p = Path(doc.storage_path)
+        if not p.exists():
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found on disk")
+        return FileResponse(path=str(p), filename=doc.file_name, media_type="application/octet-stream")
+
+    # Generated artifact → stream the text content as a .txt/.sql file
+    art = db.get(GeneratedArtifact, document_id)
+    if art:
+        ext = ".sql" if art.artifact_type == ArtifactType.SQL_SCHEMA.value else ".txt"
+        filename = f"{art.artifact_type}_{art.id}{ext}"
+        content_bytes = (art.content or "").encode("utf-8")
+        return StreamingResponse(
+            BytesIO(content_bytes),
+            media_type="text/plain",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
 
 
 # ===========================================================================
@@ -1205,6 +1210,9 @@ def list_providers(
                 "project_id": c.project_id,
                 "provider_name": c.provider_name,
                 "enabled": c.enabled,
+                "base_url": c.base_url,
+                "model": c.model,
+                "api_version": c.api_version,
             }
             for c in configs
         ],
@@ -1234,6 +1242,9 @@ def configure_provider(
     if existing:
         existing.enabled = payload.enabled
         existing.encrypted_key = encrypted
+        existing.base_url = payload.base_url
+        existing.model = payload.model
+        existing.api_version = payload.api_version
         provider_row = existing
     else:
         provider_row = ProviderConfiguration(
@@ -1241,6 +1252,9 @@ def configure_provider(
             provider_name=payload.provider_name,
             enabled=payload.enabled,
             encrypted_key=encrypted,
+            base_url=payload.base_url,
+            model=payload.model,
+            api_version=payload.api_version,
         )
         db.add(provider_row)
 
@@ -1275,12 +1289,16 @@ def test_provider(
 
     raw_key: str | None = None
     if config and config.encrypted_key:
-        from cryptography.fernet import Fernet
-        import os
-        enc_key = os.getenv("PROVIDER_KEY_ENCRYPTION_KEY", "wSqu6lOQVJ2WhQddQB-TNdPSBQVmeLVC7AQ-9hszUDY=")
-        raw_key = Fernet(enc_key.encode()).decrypt(config.encrypted_key.encode()).decode()
+        from .agents.llm_service import _decrypt_provider_key
+        raw_key = _decrypt_provider_key(config.encrypted_key)
 
-    result = ai_service.test_provider(payload.provider_name, raw_key)
+    result = ai_service.test_provider(
+        payload.provider_name,
+        raw_key,
+        base_url=config.base_url if config else None,
+        model=config.model if config else None,
+        api_version=config.api_version if config else None,
+    )
 
     return {
         "provider_name": payload.provider_name,

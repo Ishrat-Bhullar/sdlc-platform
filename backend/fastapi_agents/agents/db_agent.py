@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import os
 from pydantic import BaseModel, Field
-from llm_client import OllamaClient, call_and_validate
-from ba_agent import BusinessAnalystOutput
+from .llm_service import LLMService
+from .ba_agent import BusinessAnalystOutput
 
 
 # ==========================================================
@@ -163,8 +163,8 @@ class DatabaseAgent:
     and granular analysis dialogues using validated runtime schemas.
     """
 
-    def __init__(self, client: OllamaClient | None = None):
-        self.client = client or OllamaClient()
+    def __init__(self, llm: LLMService | None = None, *, db=None, project_id: int | None = None):
+        self.llm = llm or LLMService(db=db, project_id=project_id, role="database")
 
     def generate_schema_and_migrations(
         self,
@@ -183,8 +183,7 @@ class DatabaseAgent:
                 f"Requested database dialect translation targets unsupported by platform runtime options: {db_type}"
             )
 
-        result = call_and_validate(
-            client=self.client,
+        result = self.llm.generate_json(
             system=load_prompt("db_agent_generation_prompt.txt"),
             prompt=build_schema_prompt(
                 ba_output=ba_output,
@@ -216,8 +215,7 @@ class DatabaseAgent:
         if not user_query.strip():
             raise ValueError("Input conversation user diagnostic string fields cannot be empty or blank.")
 
-        result = call_and_validate(
-            client=self.client,
+        result = self.llm.generate_json(
             system=load_prompt("db_agent_chat_prompt.txt"),
             prompt=build_schema_chat_prompt(
                 schema_json=schema_json,
@@ -230,75 +228,3 @@ class DatabaseAgent:
             raise ValueError("Operational parsing exception encountered: Result failed chat output signature checks.")
 
         return result
-
-
-# ==========================================================
-# Local System Diagnostics Integration Verification Suite
-# ==========================================================
-
-if __name__ == "__main__":
-    print("====================================================================")
-    print("Executing Local Agent Integration Diagnostics Setup Pipeline Test...")
-    print("====================================================================\n")
-
-    agent = DatabaseAgent()
-
-    mock_ba_output = {
-        "epics": [
-            {
-                "id": "EPIC-1",
-                "name": "Authentication",
-                "description": "Handles baseline security and user account validation protocols."
-            }
-        ],
-        "user_stories": [
-            {
-                "id": "US-1",
-                "epic_id": "EPIC-1",
-                "story": "As a user, I want to log in so that I can securely view my dashboard panel.",
-                "priority": "Must",
-                "acceptance_criteria": [
-                    {
-                        "given": "User is situated on the login interface index portal",
-                        "when": "User enters correct account validation credentials",
-                        "then": "Main system security session context launches successfully"
-                    }
-                ]
-            }
-        ],
-        "business_rules": [
-            {
-                "id": "BR-1",
-                "rule": "Password text strings must be hashed and encrypted before payload dispatch.",
-                "applies_to": "US-1"
-            }
-        ],
-        "stakeholders": [
-            "User",
-            "Admin"
-        ]
-    }
-
-    try:
-        # Step 1: Execute Relational Design Structure Tests Block
-        print("[TEST WORKFLOW 1]: Dispatches requirements structure graphs into LLM client engine...")
-        schema_output = agent.generate_schema_and_migrations(
-            mock_ba_output,
-            db_type="PostgreSQL"
-        )
-
-        print("\n>>> COMPILATION OK: COMPILED DATABASES SCHEMA TOPOLOGY MAPS <<<\n")
-        print(schema_output.model_dump_json(indent=2))
-
-        # Step 2: Execute Architecture QA Interaction Analysis Tests Block
-        print("\n[TEST WORKFLOW 2]: Passing compiled topology structures into schema dialogue loop...")
-        chat_output = agent.chat_with_schema(
-            schema_output,
-            "What tables are available and how are they related?"
-        )
-
-        print("\n>>> INTERACTION OK: DIALOGUE CONTEXT VERIFICATION PAYLOAD <<<\n")
-        print(chat_output.model_dump_json(indent=2))
-
-    except Exception as operational_error_catch:
-        print(f"\nTerminal integration validation check script run failed: {operational_error_catch}")

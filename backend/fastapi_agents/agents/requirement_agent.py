@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pydantic import BaseModel
-from .llm_client import OllamaClient, call_and_validate
+from .llm_service import LLMService
 
 
 # ---------------------------------
@@ -33,18 +33,79 @@ class RiskLevel(str, Enum):
 # Schema Models
 # ---------------------------------
 
+class GivenWhenThen(BaseModel):
+    given: str
+    when: str
+    then: str
+
+
+class ApiConsiderationEndpoint(BaseModel):
+    method: str
+    path: str
+    desc: str = ""
+    success: str = ""
+    errors: str = ""
+
+
+class ApiConsiderations(BaseModel):
+    endpoints: list[ApiConsiderationEndpoint] = []
+    notes: list[str] = []
+
+
+class DbImpact(BaseModel):
+    primary_table: str = ""
+    columns_touched: list[str] = []
+    notes: list[str] = []
+
+
 class RequirementItem(BaseModel):
     id: str
     description: str
     category: RequirementCategory
     priority: MoscowPriority
     risk_level: RiskLevel
+    # --- Implementation-ready detail rendered by RequirementCard's
+    # per-requirement accordion (frontend/src/pages/RequirementsWorkspace.tsx) ---
+    business_rules: list[str] = []
+    edge_cases: list[str] = []
+    validations: list[str] = []
+    workflow: list[str] = []
+    acceptance_criteria: list[GivenWhenThen] = []
+    api_considerations: ApiConsiderations = ApiConsiderations()
+    ui_behavior: list[str] = []
+    db_impact: DbImpact = DbImpact()
+    dependencies: list[str] = []
+    constraints: list[str] = []
+    nfr_targets: dict[str, str] = {}
+    assumptions: list[str] = []
+
+
+class UserRole(BaseModel):
+    name: str
+    description: str = ""
+    permissions: list[str] = []
+
+
+class TraceabilityEntry(BaseModel):
+    requirement_id: str
+    business_goal: str = ""
+    source: str = ""
+    related_requirements: list[str] = []
+
+
+class ErrorScenario(BaseModel):
+    requirement_id: str
+    scenario: str
+    expected_behavior: str = ""
 
 
 class RequirementAgentOutput(BaseModel):
     requirements: list[RequirementItem]
     risks: list[str]
     dependencies: list[str]
+    user_roles: list[UserRole] = []
+    traceability: list[TraceabilityEntry] = []
+    error_scenarios: list[ErrorScenario] = []
 
 
 # ---------------------------------
@@ -85,15 +146,14 @@ Generate the structured requirement output now.
 # ---------------------------------
 
 class RequirementAgent:
-    def __init__(self, client: OllamaClient | None = None):
-        self.client = client or OllamaClient()
+    def __init__(self, llm: LLMService | None = None, *, db=None, project_id: int | None = None):
+        self.llm = llm or LLMService(db=db, project_id=project_id, role="requirements")
 
     def run(self, requirement_text: str) -> RequirementAgentOutput:
         if not requirement_text.strip():
             raise ValueError("Requirement text cannot be empty")
 
-        result = call_and_validate(
-            client=self.client,
+        result = self.llm.generate_json(
             system=REQUIREMENT_AGENT_SYSTEM_PROMPT,
             prompt=build_requirement_prompt(requirement_text),
             schema=RequirementAgentOutput,
@@ -103,27 +163,3 @@ class RequirementAgent:
             raise ValueError("No requirements generated")
 
         return result
-
-
-# ---------------------------------
-# Test Run Block
-# ---------------------------------
-
-if __name__ == "__main__":
-    agent = RequirementAgent()
-
-    test_prompt = (
-        "Build a banking portal with login, account dashboard "
-        "and transaction history"
-    )
-
-    print("Running Requirement Agent Test...")
-
-    try:
-        output = agent.run(test_prompt)
-        print("\n--- TEST SUCCESSFUL ---")
-        print(output.model_dump_json(indent=2))
-
-    except Exception as e:
-        print("\n--- TEST FAILED ---")
-        print(f"Error: {e}")

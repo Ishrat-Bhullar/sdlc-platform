@@ -53,9 +53,7 @@ def integrate() -> None:
             Called by agent_runner._execute_agent when generate='generate_presentation'.
             """
             try:
-                # Resolve provider from project config (reuse existing resolver)
-                provider, api_key = ai_service._get_active_provider(db, project_id)
-                agent = PresentationVideoAgent(provider=provider, api_key=api_key)
+                agent = PresentationVideoAgent(db=db, project_id=project_id)
 
                 # Build full artifact context (not just the slim context string)
                 from .models import GeneratedArtifact

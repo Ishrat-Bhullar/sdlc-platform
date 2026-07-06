@@ -34,13 +34,55 @@ interface ArchitectureDiagramViewerProps {
   className?: string;
 }
 
+// ─── Mermaid source sanitization ──────────────────────────────────────────────
+
+/**
+ * LLM-generated Mermaid source (this project's diagrams are 100% LLM output,
+ * never validated before storage) routinely writes bare multi-word node
+ * names with no quoting/brackets — e.g. `User-->Claims Intake Service` — and
+ * occasionally a malformed edge-label arrow like `-->|Submit Claim|>Target`
+ * (an extra trailing `>` after the label's closing pipe). Both are syntax
+ * errors Mermaid's parser correctly rejects. Rather than trying to get an
+ * LLM to reliably follow strict Mermaid grammar, sanitize simple `A-->B` /
+ * `A-->|label|B` edge lines here before rendering. Lines that don't match
+ * this exact shape (already-bracketed nodes, subgraph/class/sequence/ER
+ * syntax, etc.) pass through untouched.
+ */
+export function sanitizeMermaidSource(source: string): string {
+  const idFor = new Map<string, string>();
+  let counter = 0;
+  const safeId = (label: string): string => {
+    if (idFor.has(label)) return idFor.get(label)!;
+    const id = `n${counter++}`;
+    idFor.set(label, id);
+    return id;
+  };
+
+  const edgeLine = /^(\s*)([^-|>[\](){}"\n]+?)\s*-->\s*(?:\|([^|]*)\|>?\s*)?([^-|>[\](){}"\n]+?)\s*$/;
+
+  return source
+    .split('\n')
+    .map((line) => {
+      const m = line.match(edgeLine);
+      if (!m) return line;
+      const [, indent, rawA, label, rawB] = m;
+      const a = rawA.trim();
+      const b = rawB.trim();
+      if (!a.includes(' ') && !b.includes(' ')) return line;
+      const edge = label !== undefined ? `-->|${label.trim()}|` : '-->';
+      return `${indent}${safeId(a)}["${a}"] ${edge} ${safeId(b)}["${b}"]`;
+    })
+    .join('\n');
+}
+
 // ─── Mermaid rendering helper ─────────────────────────────────────────────────
 
 /**
  * Render Mermaid diagram source to an SVG string using the Mermaid API.
  * Falls back to a text representation if Mermaid is unavailable.
  */
-async function renderMermaidToSvg(source: string): Promise<string> {
+async function renderMermaidToSvg(rawSource: string): Promise<string> {
+  const source = sanitizeMermaidSource(rawSource);
   try {
     const mermaid = await import('mermaid');
     // Initialize once

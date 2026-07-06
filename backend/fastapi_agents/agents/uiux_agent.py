@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pydantic import BaseModel
-from .llm_client import OllamaClient, call_and_validate
+from .llm_service import LLMService
 
 
 # ---------------------------------
@@ -154,8 +154,8 @@ Generate the structured UI/UX design output now.
 # ---------------------------------
 
 class UIUXDesignAgent:
-    def __init__(self, client: OllamaClient | None = None):
-        self.client = client or OllamaClient()
+    def __init__(self, llm: LLMService | None = None, *, db=None, project_id: int | None = None):
+        self.llm = llm or LLMService(db=db, project_id=project_id, role="architect")
 
     def run(
         self,
@@ -167,8 +167,7 @@ class UIUXDesignAgent:
         if not project_description:
             raise ValueError("Project description cannot be empty")
 
-        result = call_and_validate(
-            client=self.client,
+        result = self.llm.generate_json(
             system=UIUX_AGENT_SYSTEM_PROMPT,
             prompt=build_uiux_prompt(project_description, requirements, user_stories),
             schema=UIUXDesignOutput,
@@ -187,35 +186,3 @@ class UIUXDesignAgent:
             raise ValueError("No UI/UX design generated")
 
         return result
-
-
-# ---------------------------------
-# Test Run Block
-# ---------------------------------
-
-if __name__ == "__main__":
-    agent = UIUXDesignAgent()
-
-    mock_description = "E-commerce platform for selling handmade crafts"
-    mock_requirements = {
-        "functional": [
-            {"id": "REQ-001", "description": "Users must be able to browse products"},
-            {"id": "REQ-002", "description": "Users must be able to add items to cart"}
-        ]
-    }
-    mock_stories = {
-        "stories": [
-            {"id": "US-001", "title": "Browse products as a customer"}
-        ]
-    }
-
-    print("Running UI/UX Design Agent Test...")
-
-    try:
-        output = agent.run(mock_description, mock_requirements, mock_stories)
-        print("\n--- TEST SUCCESSFUL ---")
-        print(output.model_dump_json(indent=2))
-
-    except Exception as e:
-        print("\n--- TEST FAILED ---")
-        print(f"Error: {e}")

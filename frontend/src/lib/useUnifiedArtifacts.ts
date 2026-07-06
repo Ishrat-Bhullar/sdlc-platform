@@ -179,6 +179,9 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
       risks: (data.risks as string[]) || [],
       dependencies: (data.dependencies as any[]) || [],
       summary: (data.summary as Record<string, unknown>) || {},
+      user_roles: (data.user_roles as any[]) || [],
+      traceability: (data.traceability as any[]) || [],
+      error_scenarios: (data.error_scenarios as any[]) || [],
     };
   }, [getArtifact]);
 
@@ -188,19 +191,42 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
     return {
       epics: (data.epics as any[]) || [],
       total_stories: (data.total_stories as number) || 0,
+      detailed_brd: (data.detailed_brd as string) || '',
+      srs: (data.srs as string) || '',
+      personas: (data.personas as any[]) || [],
+      process_flows: (data.process_flows as any[]) || [],
+      business_workflows: (data.business_workflows as string[]) || [],
+      validation_rules: (data.validation_rules as string[]) || [],
+      exception_handling: (data.exception_handling as string[]) || [],
+      risk_analysis: (data.risk_analysis as any[]) || [],
+      success_metrics: (data.success_metrics as any[]) || [],
     };
   }, [getArtifact]);
 
   const getArchitecture = useCallback((): ArchitectureContent | null => {
     const data = getArtifact('architecture_diagram') || getArtifact('architecture_proposals');
     if (!data) return null;
+    // The architect agent now also emits `tech_stack_local` / `tech_stack_cloud`
+    // (a richer dual-stack recommendation) and leaves the older single
+    // `tech_stack` field empty. Fall back to flattening `tech_stack_local`
+    // (excluding its narrative sub-fields) so real data still surfaces here.
+    let techStack = (data.tech_stack as Record<string, string>) || (data.techStack as Record<string, string>) || {};
+    if (Object.keys(techStack).length === 0 && data.tech_stack_local && typeof data.tech_stack_local === 'object') {
+      const skip = new Set(['label', 'rationale', 'trade_offs', 'estimated_cost_profile', 'scalability_notes']);
+      techStack = Object.fromEntries(
+        Object.entries(data.tech_stack_local as Record<string, unknown>).filter(
+          ([k, v]) => !skip.has(k) && typeof v === 'string'
+        ) as [string, string][]
+      );
+    }
     return {
       architecture_summary: (data.architecture_summary as string) || (data.justification as string) || '',
       pattern: (data.pattern as string) || '',
       microservices: (data.microservices as any[]) || (data.services as any[]) || [],
       components: (data.components as any[]) || (data.services as any[]) || [],
       diagrams: Array.isArray(data.diagrams) ? data.diagrams as any[] : Object.entries((data.diagrams as Record<string, string>) || {}).map(([type, content]) => ({ type, content })),
-      tech_stack: (data.tech_stack as Record<string, string>) || (data.techStack as Record<string, string>) || {},
+      tech_stack: techStack,
+      architecture_decisions: (data.architecture_decisions as any[]) || [],
     };
   }, [getArtifact]);
 
@@ -211,6 +237,12 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
       tables: (data.tables as any[]) || [],
       relationships: (data.relationships as any[]) || [],
       sql_ddl: (data.sql_ddl as string) || (data.migrationSQL as string) || '',
+      normalization_notes: (data.normalization_notes as string) || '',
+      audit_tables: (data.audit_tables as string[]) || [],
+      sample_data: (data.sample_data as Record<string, any[]>) || {},
+      scaling_strategy: (data.scaling_strategy as string) || '',
+      partitioning_recommendations: (data.partitioning_recommendations as string) || '',
+      design_decisions: (data.design_decisions as any[]) || [],
     };
   }, [getArtifact]);
 
@@ -272,6 +304,22 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
         modules: (data.modules as string[]) || [],
         implementation: (data.implementation as string) || '',
         files: (data.files as any[]) || [],
+        folder_structure: (data.folder_structure as string[]) || [],
+        component_architecture: (data.component_architecture as any[]) || [],
+        routing: (data.routing as any[]) || [],
+        state_management: (data.state_management as any) || {},
+        api_integration_plan: (data.api_integration_plan as any[]) || [],
+        forms: (data.forms as any[]) || [],
+        error_handling: (data.error_handling as string[]) || [],
+        reusable_components: (data.reusable_components as any[]) || [],
+        api_specifications: (data.api_specifications as any[]) || [],
+        authentication: (data.authentication as any) || {},
+        authorization: (data.authorization as any) || {},
+        service_layer: (data.service_layer as any[]) || [],
+        repository_layer: (data.repository_layer as any[]) || [],
+        validation: (data.validation as string[]) || [],
+        exception_handling: (data.exception_handling as any[]) || [],
+        background_jobs: (data.background_jobs as any[]) || [],
       };
     },
     [getArtifact]
@@ -285,6 +333,14 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
       suites: (data.suites as string[]) || [],
       status: (data.status as 'passed' | 'failed' | 'pending') || 'pending',
       coverage_targets: (data.coverage_targets as Record<string, number>) || {},
+      unit_tests: (data.unit_tests as any[]) || [],
+      integration_tests: (data.integration_tests as any[]) || [],
+      api_tests: (data.api_tests as any[]) || [],
+      ui_tests: (data.ui_tests as any[]) || [],
+      performance_tests: (data.performance_tests as any[]) || [],
+      security_tests: (data.security_tests as any[]) || [],
+      edge_cases: (data.edge_cases as string[]) || [],
+      test_data: (data.test_data as any[]) || [],
     };
   }, [getArtifact]);
 
@@ -295,6 +351,14 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
       documents: (data.documents as string[]) || [],
       format: (data.format as 'Markdown' | 'PDF' | 'HTML') || 'Markdown',
       status: (data.status as 'generated' | 'pending' | 'failed') || 'pending',
+      developer_guide: (data.developer_guide as string) || '',
+      deployment_guide: (data.deployment_guide as string) || '',
+      installation_guide: (data.installation_guide as string) || '',
+      api_documentation: (data.api_documentation as string) || '',
+      operations_guide: (data.operations_guide as string) || '',
+      maintenance_guide: (data.maintenance_guide as string) || '',
+      troubleshooting: (data.troubleshooting as any[]) || [],
+      faqs: (data.faqs as any[]) || [],
     };
   }, [getArtifact]);
 

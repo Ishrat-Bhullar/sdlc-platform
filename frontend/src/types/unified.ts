@@ -27,7 +27,6 @@ export interface AgentRun {
   start_time: string | null;
   end_time: string | null;
   output_url: string | null;
-  error_message?: string;
   artifacts: Artifact[];
   approval?: Approval;
 }
@@ -109,6 +108,9 @@ export interface RequirementsContent {
   dependencies?: Dependency[];
   acceptanceCriteria?: AcceptanceCriterion[];
   summary?: Record<string, unknown>;
+  user_roles?: UserRole[];
+  traceability?: TraceabilityEntry[];
+  error_scenarios?: ErrorScenario[];
 }
 
 export interface Requirement {
@@ -119,6 +121,38 @@ export interface Requirement {
   risk_level: 'high' | 'medium' | 'low';
   status?: string;
   source?: string;
+  // Implementation-ready per-requirement detail (rendered by RequirementCard's accordion)
+  business_rules?: string[];
+  edge_cases?: string[];
+  validations?: string[];
+  workflow?: string[];
+  acceptance_criteria?: AcceptanceCriterion[];
+  api_considerations?: { endpoints?: Array<{ method: string; path: string; desc?: string; success?: string; errors?: string }>; notes?: string[] };
+  ui_behavior?: string[];
+  db_impact?: { primary_table?: string; columns_touched?: string[]; notes?: string[] };
+  dependencies?: string[];
+  constraints?: string[];
+  nfr_targets?: Record<string, string>;
+  assumptions?: string[];
+}
+
+export interface UserRole {
+  name: string;
+  description?: string;
+  permissions?: string[];
+}
+
+export interface TraceabilityEntry {
+  requirement_id: string;
+  business_goal?: string;
+  source?: string;
+  related_requirements?: string[];
+}
+
+export interface ErrorScenario {
+  requirement_id: string;
+  scenario: string;
+  expected_behavior?: string;
 }
 
 export interface Dependency {
@@ -133,6 +167,42 @@ export interface Dependency {
 export interface UserStoriesContent {
   epics: Epic[];
   total_stories: number;
+  detailed_brd?: string;
+  srs?: string;
+  personas?: Persona[];
+  process_flows?: ProcessFlow[];
+  business_workflows?: string[];
+  validation_rules?: string[];
+  exception_handling?: string[];
+  risk_analysis?: RiskAnalysisItem[];
+  success_metrics?: SuccessMetric[];
+}
+
+export interface Persona {
+  name: string;
+  role?: string;
+  goals?: string[];
+  pain_points?: string[];
+  demographics?: string;
+}
+
+export interface ProcessFlow {
+  name: string;
+  steps?: string[];
+  diagram?: string;
+}
+
+export interface RiskAnalysisItem {
+  risk: string;
+  likelihood?: string;
+  impact?: string;
+  mitigation?: string;
+}
+
+export interface SuccessMetric {
+  metric: string;
+  target?: string;
+  measurement_method?: string;
 }
 
 export interface Epic {
@@ -166,6 +236,14 @@ export interface ArchitectureContent {
   components: Component[];
   diagrams: Diagram[];
   tech_stack: Record<string, string>;
+  architecture_decisions: ArchitectureDecisionItem[];
+}
+
+export interface ArchitectureDecisionItem {
+  decision: string;
+  rationale: string;
+  alternatives_considered?: string;
+  consequences: string;
 }
 
 export interface Microservice {
@@ -190,6 +268,12 @@ export interface DatabaseSchemaContent {
   tables: TableDef[];
   relationships: RelationshipDef[];
   sql_ddl: string;
+  normalization_notes?: string;
+  audit_tables?: string[];
+  sample_data?: Record<string, Array<Record<string, unknown>>>;
+  scaling_strategy?: string;
+  partitioning_recommendations?: string;
+  design_decisions?: { decision: string; rationale: string }[];
 }
 
 export interface TableDef {
@@ -279,6 +363,24 @@ export interface GeneratedCodeContent {
   modules: string[];
   implementation: string;
   files?: CodeFile[];
+  // Frontend-specific
+  folder_structure?: string[];
+  component_architecture?: FrontendComponentSpec[];
+  routing?: RouteSpec[];
+  state_management?: StateManagementPlan;
+  api_integration_plan?: ApiIntegrationItem[];
+  forms?: FormSpec[];
+  error_handling?: string[];
+  reusable_components?: ReusableComponentSpec[];
+  // Backend-specific
+  api_specifications?: EndpointSpec[];
+  authentication?: { strategy?: string; token_type?: string; session_handling?: string };
+  authorization?: { model?: string; roles?: string[]; permission_matrix?: Record<string, string[]> };
+  service_layer?: ServiceSpec[];
+  repository_layer?: RepositorySpec[];
+  validation?: string[];
+  exception_handling?: ExceptionHandlingSpec[];
+  background_jobs?: BackgroundJobSpec[];
 }
 
 export interface CodeFile {
@@ -288,17 +390,135 @@ export interface CodeFile {
   language: string;
 }
 
+export interface FrontendComponentSpec {
+  name: string;
+  type?: string;
+  responsibility?: string;
+  props?: string[];
+  children?: string[];
+}
+
+export interface RouteSpec {
+  path: string;
+  component?: string;
+  guarded?: boolean;
+  description?: string;
+}
+
+export interface StateManagementPlan {
+  approach?: string;
+  rationale?: string;
+  stores?: Array<{ name: string; shape?: string; purpose?: string }>;
+}
+
+export interface ApiIntegrationItem {
+  endpoint: string;
+  method?: string;
+  hook_name?: string;
+  error_handling?: string;
+  loading_state?: string;
+}
+
+export interface FormSpec {
+  name: string;
+  fields?: Array<{ name: string; type?: string; validation?: string }>;
+  submit_behavior?: string;
+}
+
+export interface ReusableComponentSpec {
+  name: string;
+  purpose?: string;
+  props?: string[];
+  variants?: string[];
+}
+
+export interface EndpointSpec {
+  method: string;
+  path: string;
+  summary?: string;
+  request_schema?: Record<string, unknown>;
+  response_schema?: Record<string, unknown>;
+  status_codes?: Record<string, string>;
+}
+
+export interface ServiceSpec {
+  name: string;
+  responsibility?: string;
+  methods?: string[];
+  depends_on?: string[];
+}
+
+export interface RepositorySpec {
+  name: string;
+  entity?: string;
+  methods?: string[];
+}
+
+export interface ExceptionHandlingSpec {
+  exception_type: string;
+  http_status?: string;
+  handling_strategy?: string;
+}
+
+export interface BackgroundJobSpec {
+  name: string;
+  trigger?: string;
+  schedule?: string;
+  purpose?: string;
+}
+
 export interface TestReportContent {
   summary: string;
   suites: string[];
   status: 'passed' | 'failed' | 'pending';
   coverage_targets: Record<string, number>;
+  unit_tests?: TestCaseSpec[];
+  integration_tests?: TestCaseSpec[];
+  api_tests?: TestCaseSpec[];
+  ui_tests?: TestCaseSpec[];
+  performance_tests?: TestCaseSpec[];
+  security_tests?: TestCaseSpec[];
+  edge_cases?: string[];
+  test_data?: TestDataSpec[];
+}
+
+export interface TestCaseSpec {
+  id: string;
+  name: string;
+  target?: string;
+  scenario?: string;
+  expected_result?: string;
+}
+
+export interface TestDataSpec {
+  entity: string;
+  sample_payload?: Record<string, unknown>;
+  purpose?: string;
 }
 
 export interface DocumentationContent {
   documents: string[];
   format: 'Markdown' | 'PDF' | 'HTML';
   status: 'generated' | 'pending' | 'failed';
+  developer_guide?: string;
+  deployment_guide?: string;
+  installation_guide?: string;
+  api_documentation?: string;
+  operations_guide?: string;
+  maintenance_guide?: string;
+  troubleshooting?: TroubleshootingItem[];
+  faqs?: FAQItem[];
+}
+
+export interface TroubleshootingItem {
+  issue: string;
+  symptoms?: string;
+  resolution?: string;
+}
+
+export interface FAQItem {
+  question: string;
+  answer?: string;
 }
 
 // ─── Dashboard & Monitoring Models ───────────────────────────────────────────

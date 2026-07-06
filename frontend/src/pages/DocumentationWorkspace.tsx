@@ -13,12 +13,15 @@ import {
   Copy,
 } from 'lucide-react';
 import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Accordion, AccordionItem } from '../components/ui/Accordion';
+import { Markdown } from '../components/ui/Markdown';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
 import type { DocumentationContent } from '../types/unified';
+import { Rocket, Download as DownloadIcon, Terminal, Code2, Activity, Wrench, HelpCircle, LifeBuoy } from 'lucide-react';
 
 export function DocumentationWorkspace() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'documents' | 'formats'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'documents' | 'formats' | 'guides' | 'help'>('overview');
   const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
   const projectId = getSelectedProjectId();
   const { getDocumentation, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
@@ -143,6 +146,8 @@ export function DocumentationWorkspace() {
           { id: 'overview', label: 'Overview', icon: Eye },
           { id: 'documents', label: 'Documents', icon: BookOpen },
           { id: 'formats', label: 'Formats', icon: FileText },
+          { id: 'guides', label: 'Guides', icon: Rocket },
+          { id: 'help', label: 'Troubleshooting & FAQs', icon: LifeBuoy },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -264,6 +269,95 @@ export function DocumentationWorkspace() {
             </div>
           </div>
         </Card>
+      )}
+
+      {/* Guides tab */}
+      {activeTab === 'guides' && (
+        <Card>
+          {!documentation.developer_guide && !documentation.deployment_guide && !documentation.installation_guide &&
+           !documentation.api_documentation && !documentation.operations_guide && !documentation.maintenance_guide ? (
+            <div className="py-8 text-center">
+              <Rocket className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+              <p className="text-sm text-text-muted">No detailed guides generated yet.</p>
+            </div>
+          ) : (
+            <Accordion>
+              {documentation.developer_guide && (
+                <AccordionItem title="Developer Guide" icon={Code2} defaultOpen>
+                  <Markdown content={documentation.developer_guide} />
+                </AccordionItem>
+              )}
+              {documentation.installation_guide && (
+                <AccordionItem title="Installation Guide" icon={DownloadIcon}>
+                  <Markdown content={documentation.installation_guide} />
+                </AccordionItem>
+              )}
+              {documentation.deployment_guide && (
+                <AccordionItem title="Deployment Guide" icon={Rocket}>
+                  <Markdown content={documentation.deployment_guide} />
+                </AccordionItem>
+              )}
+              {documentation.api_documentation && (
+                <AccordionItem title="API Documentation" icon={Terminal}>
+                  <Markdown content={documentation.api_documentation} />
+                </AccordionItem>
+              )}
+              {documentation.operations_guide && (
+                <AccordionItem title="Operations Guide" icon={Activity}>
+                  <Markdown content={documentation.operations_guide} />
+                </AccordionItem>
+              )}
+              {documentation.maintenance_guide && (
+                <AccordionItem title="Maintenance Guide" icon={Wrench}>
+                  <Markdown content={documentation.maintenance_guide} />
+                </AccordionItem>
+              )}
+            </Accordion>
+          )}
+        </Card>
+      )}
+
+      {/* Troubleshooting & FAQs tab */}
+      {activeTab === 'help' && (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Card>
+            <div className="flex items-center gap-2 mb-4">
+              <Wrench className="h-5 w-5 text-ey-yellow" />
+              <h3 className="text-lg font-semibold text-text-primary">Troubleshooting</h3>
+            </div>
+            {!documentation.troubleshooting?.length ? (
+              <p className="text-sm text-text-muted">No troubleshooting entries generated yet.</p>
+            ) : (
+              <div className="space-y-3">
+                {documentation.troubleshooting.map((t, i) => (
+                  <div key={i} className="rounded-lg bg-dark-bg p-3">
+                    <p className="text-sm font-medium text-text-primary mb-1">{t.issue}</p>
+                    {t.symptoms && <p className="text-xs text-text-secondary mb-1"><span className="text-text-muted">Symptoms:</span> {t.symptoms}</p>}
+                    {t.resolution && <p className="text-xs text-status-success"><span className="text-text-muted">Resolution:</span> {t.resolution}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+          <Card>
+            <div className="flex items-center gap-2 mb-4">
+              <HelpCircle className="h-5 w-5 text-ey-yellow" />
+              <h3 className="text-lg font-semibold text-text-primary">FAQs</h3>
+            </div>
+            {!documentation.faqs?.length ? (
+              <p className="text-sm text-text-muted">No FAQs generated yet.</p>
+            ) : (
+              <div className="space-y-3">
+                {documentation.faqs.map((f, i) => (
+                  <div key={i} className="rounded-lg bg-dark-bg p-3">
+                    <p className="text-sm font-medium text-text-primary mb-1">{f.question}</p>
+                    {f.answer && <p className="text-xs text-text-secondary">{f.answer}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
       )}
     </div>
   );

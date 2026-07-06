@@ -14,12 +14,14 @@ import {
   Eye,
 } from 'lucide-react';
 import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Accordion, AccordionItem, BulletList, DataTable } from '../components/ui/Accordion';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
 import type { CodeFile } from '../types/unified';
+import { Layers, Lock, ShieldCheck, Database, Boxes, Clock3, AlertOctagon } from 'lucide-react';
 
 export function BackendWorkspace() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'files' | 'structure'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'files' | 'structure' | 'architecture'>('overview');
   const [selectedFile, setSelectedFile] = useState<CodeFile | null>(null);
   const projectId = getSelectedProjectId();
   const { getGeneratedCode, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
@@ -149,6 +151,7 @@ export function BackendWorkspace() {
           { id: 'overview', label: 'Overview', icon: Eye },
           { id: 'files', label: 'Files', icon: FileCode },
           { id: 'structure', label: 'Structure', icon: FolderTree },
+          { id: 'architecture', label: 'Full Architecture', icon: Layers },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -260,6 +263,106 @@ export function BackendWorkspace() {
               </div>
             ))}
           </div>
+        </Card>
+      )}
+
+      {/* Full Architecture tab */}
+      {activeTab === 'architecture' && (
+        <Card>
+          {!backendCode.api_specifications?.length && !backendCode.service_layer?.length && !backendCode.repository_layer?.length && !backendCode.authentication?.strategy ? (
+            <div className="py-8 text-center">
+              <Layers className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+              <p className="text-sm text-text-muted">No detailed backend architecture generated yet.</p>
+            </div>
+          ) : (
+            <Accordion>
+              {!!backendCode.api_specifications?.length && (
+                <AccordionItem title="API Specifications" icon={Boxes} defaultOpen badge={<span className="text-[10px] text-text-muted">{backendCode.api_specifications.length}</span>}>
+                  <DataTable
+                    columns={['Method', 'Path', 'Summary', 'Status Codes']}
+                    rows={backendCode.api_specifications.map((e) => ({
+                      Method: <span className={`font-mono font-semibold ${e.method === 'GET' ? 'text-status-info' : e.method === 'DELETE' ? 'text-status-error' : 'text-status-success'}`}>{e.method}</span>,
+                      Path: <span className="font-mono">{e.path}</span>,
+                      Summary: e.summary,
+                      'Status Codes': Object.entries(e.status_codes || {}).map(([code, meaning]) => `${code}: ${meaning}`).join(' · '),
+                    }))}
+                  />
+                </AccordionItem>
+              )}
+              {backendCode.authentication?.strategy && (
+                <AccordionItem title="Authentication" icon={Lock}>
+                  <p className="text-xs text-text-primary font-medium">{backendCode.authentication.strategy}</p>
+                  {backendCode.authentication.token_type && <p className="text-[11px] text-text-secondary mt-1">Token type: {backendCode.authentication.token_type}</p>}
+                  {backendCode.authentication.session_handling && <p className="text-[11px] text-text-secondary">{backendCode.authentication.session_handling}</p>}
+                </AccordionItem>
+              )}
+              {backendCode.authorization?.model && (
+                <AccordionItem title="Authorization" icon={ShieldCheck}>
+                  <p className="text-xs text-text-primary font-medium mb-2">{backendCode.authorization.model}</p>
+                  <div className="space-y-1">
+                    {Object.entries(backendCode.authorization.permission_matrix || {}).map(([role, actions]) => (
+                      <p key={role} className="text-[11px] text-text-secondary"><span className="text-ey-yellow">{role}:</span> {(actions as string[]).join(', ')}</p>
+                    ))}
+                  </div>
+                </AccordionItem>
+              )}
+              {!!backendCode.service_layer?.length && (
+                <AccordionItem title="Service Layer" icon={Layers} badge={<span className="text-[10px] text-text-muted">{backendCode.service_layer.length}</span>}>
+                  <div className="space-y-2">
+                    {backendCode.service_layer.map((s, i) => (
+                      <div key={i} className="rounded-lg bg-dark-bg p-3">
+                        <p className="text-sm font-medium text-text-primary">{s.name}</p>
+                        {s.responsibility && <p className="text-xs text-text-secondary">{s.responsibility}</p>}
+                        {!!s.methods?.length && <p className="text-[10px] text-text-muted mt-1 font-mono">{s.methods.join(', ')}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </AccordionItem>
+              )}
+              {!!backendCode.repository_layer?.length && (
+                <AccordionItem title="Repository Layer" icon={Database} badge={<span className="text-[10px] text-text-muted">{backendCode.repository_layer.length}</span>}>
+                  <div className="space-y-2">
+                    {backendCode.repository_layer.map((r, i) => (
+                      <div key={i} className="rounded-lg bg-dark-bg p-3">
+                        <p className="text-sm font-medium text-text-primary">{r.name} <span className="text-[10px] text-text-muted">({r.entity})</span></p>
+                        {!!r.methods?.length && <p className="text-[10px] text-text-muted mt-1 font-mono">{r.methods.join(', ')}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </AccordionItem>
+              )}
+              {!!backendCode.validation?.length && (
+                <AccordionItem title="Validation" icon={ShieldCheck}>
+                  <BulletList items={backendCode.validation} />
+                </AccordionItem>
+              )}
+              {!!backendCode.exception_handling?.length && (
+                <AccordionItem title="Exception Handling" icon={AlertOctagon} badge={<span className="text-[10px] text-text-muted">{backendCode.exception_handling.length}</span>}>
+                  <DataTable
+                    columns={['Exception', 'HTTP Status', 'Handling Strategy']}
+                    rows={backendCode.exception_handling.map((e) => ({
+                      Exception: <span className="font-mono">{e.exception_type}</span>,
+                      'HTTP Status': e.http_status,
+                      'Handling Strategy': e.handling_strategy,
+                    }))}
+                  />
+                </AccordionItem>
+              )}
+              {!!backendCode.background_jobs?.length && (
+                <AccordionItem title="Background Jobs" icon={Clock3} badge={<span className="text-[10px] text-text-muted">{backendCode.background_jobs.length}</span>}>
+                  <div className="space-y-2">
+                    {backendCode.background_jobs.map((j, i) => (
+                      <div key={i} className="rounded-lg bg-dark-bg p-3">
+                        <p className="text-sm font-medium text-text-primary">{j.name}</p>
+                        <p className="text-[11px] text-text-secondary">{j.purpose}</p>
+                        <p className="text-[10px] text-text-muted mt-1">Trigger: {j.trigger} {j.schedule && `· ${j.schedule}`}</p>
+                      </div>
+                    ))}
+                  </div>
+                </AccordionItem>
+              )}
+            </Accordion>
+          )}
         </Card>
       )}
     </div>

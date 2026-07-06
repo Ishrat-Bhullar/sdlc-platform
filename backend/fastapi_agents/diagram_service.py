@@ -15,10 +15,6 @@ from .architect_diagram_tools import (
 logger = logging.getLogger(__name__)
 
 
-def _safe_slug(s: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in (s or ""))[:80] or "diagram"
-
-
 @dataclass(frozen=True)
 class DiagramArtifact:
     diagram_type: str

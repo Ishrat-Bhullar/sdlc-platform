@@ -29,6 +29,8 @@ import {
   File,
 } from 'lucide-react';
 import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Accordion, AccordionItem, BulletList } from '../components/ui/Accordion';
+import { Markdown } from '../components/ui/Markdown';
 import { useProjectArtifacts } from '../lib/useProjectArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
 import { buildApiUrl } from '../lib/api';
@@ -59,8 +61,9 @@ interface EpicSummary {
 interface Persona {
   name: string;
   role: string;
-  goal: string;
+  goals: string[];
   painPoints: string[];
+  demographics: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -76,7 +79,7 @@ function parseContent(raw: string | Record<string, unknown>): Record<string, unk
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function BusinessAnalystWorkspace() {
-  const [activeTab, setActiveTab] = useState<'stories' | 'epics' | 'personas'>('stories');
+  const [activeTab, setActiveTab] = useState<'stories' | 'epics' | 'personas' | 'brd-srs' | 'flows' | 'risks'>('stories');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValues, setEditValues] = useState<Partial<StoryRow>>({});
 
@@ -89,12 +92,24 @@ export function BusinessAnalystWorkspace() {
   );
 
   const storiesData = useMemo(() => {
-    if (!storiesArtifact) return { epics: [], stories: [], personas: [] };
+    if (!storiesArtifact) return {
+      epics: [], stories: [], personas: [], detailed_brd: '', srs: '',
+      process_flows: [], business_workflows: [], validation_rules: [],
+      exception_handling: [], risk_analysis: [], success_metrics: [],
+    };
     const data = parseContent(storiesArtifact.content);
     return {
       epics: (data.epics as any[]) || [],
       stories: (data.stories as any[]) || [],
       personas: (data.personas as any[]) || [],
+      detailed_brd: (data.detailed_brd as string) || '',
+      srs: (data.srs as string) || '',
+      process_flows: (data.process_flows as any[]) || [],
+      business_workflows: (data.business_workflows as string[]) || [],
+      validation_rules: (data.validation_rules as string[]) || [],
+      exception_handling: (data.exception_handling as string[]) || [],
+      risk_analysis: (data.risk_analysis as any[]) || [],
+      success_metrics: (data.success_metrics as any[]) || [],
     };
   }, [storiesArtifact]);
 
@@ -168,8 +183,9 @@ export function BusinessAnalystWorkspace() {
     const fromData: Persona[] = (storiesData.personas || []).map((p: any) => ({
       name: String(p?.name ?? ''),
       role: String(p?.role ?? ''),
-      goal: String(p?.goal ?? ''),
-      painPoints: Array.isArray(p?.painPoints) ? p.painPoints.map(String) : [],
+      goals: Array.isArray(p?.goals) ? p.goals.map(String) : p?.goal ? [String(p.goal)] : [],
+      painPoints: Array.isArray(p?.pain_points) ? p.pain_points.map(String) : Array.isArray(p?.painPoints) ? p.painPoints.map(String) : [],
+      demographics: String(p?.demographics ?? ''),
     }));
     // Derive personas from stories if not explicitly defined
     if (fromData.length === 0) {
@@ -177,8 +193,9 @@ export function BusinessAnalystWorkspace() {
       return Array.from(roles).map((role) => ({
         name: role.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
         role,
-        goal: `As a ${role}, I want to use the banking portal effectively`,
+        goals: [`Use the system effectively to accomplish ${role} tasks`],
         painPoints: ['Needs clear navigation', 'Requires fast access to information'],
+        demographics: '',
       }));
     }
     return fromData;
@@ -355,6 +372,9 @@ try {
               { id: 'stories', label: 'User Stories', icon: FileText },
               { id: 'epics', label: 'Epics', icon: Layers },
               { id: 'personas', label: 'Personas', icon: Users },
+              { id: 'brd-srs', label: 'BRD / SRS', icon: FileTextIcon },
+              { id: 'flows', label: 'Process Flows', icon: Zap },
+              { id: 'risks', label: 'Risk & Metrics', icon: AlertTriangle },
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -590,9 +610,19 @@ try {
                           <p className="text-[10px] text-text-muted">{persona.role}</p>
                         </div>
                       </div>
-                      <p className="text-xs text-text-secondary mb-2">
-                        <span className="font-medium text-text-primary">Goal:</span> {persona.goal}
-                      </p>
+                      {persona.demographics && (
+                        <p className="text-[10px] text-text-muted italic mb-2">{persona.demographics}</p>
+                      )}
+                      {persona.goals.length > 0 && (
+                        <div className="mb-2">
+                          <p className="text-[10px] font-medium text-text-muted mb-1">Goals:</p>
+                          <ul className="list-disc list-inside space-y-0.5">
+                            {persona.goals.map((g, j) => (
+                              <li key={j} className="text-[10px] text-text-secondary">{g}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                       {persona.painPoints.length > 0 && (
                         <div>
                           <p className="text-[10px] font-medium text-text-muted mb-1">Pain Points:</p>
@@ -608,6 +638,117 @@ try {
                 ))
               )}
             </div>
+          )}
+
+          {/* BRD / SRS tab */}
+          {activeTab === 'brd-srs' && (
+            <Card>
+              {!storiesData.detailed_brd && !storiesData.srs ? (
+                <div className="py-8 text-center">
+                  <FileTextIcon className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+                  <p className="text-sm text-text-muted">No BRD/SRS generated yet.</p>
+                </div>
+              ) : (
+                <Accordion>
+                  {storiesData.detailed_brd && (
+                    <AccordionItem title="Business Requirements Document" icon={FileTextIcon} defaultOpen>
+                      <Markdown content={storiesData.detailed_brd} />
+                    </AccordionItem>
+                  )}
+                  {storiesData.srs && (
+                    <AccordionItem title="Software Requirements Specification" icon={FileText}>
+                      <Markdown content={storiesData.srs} />
+                    </AccordionItem>
+                  )}
+                </Accordion>
+              )}
+            </Card>
+          )}
+
+          {/* Process Flows tab */}
+          {activeTab === 'flows' && (
+            <Card>
+              {storiesData.process_flows.length === 0 && storiesData.business_workflows.length === 0 && storiesData.validation_rules.length === 0 && storiesData.exception_handling.length === 0 ? (
+                <div className="py-8 text-center">
+                  <Zap className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+                  <p className="text-sm text-text-muted">No process flows generated yet.</p>
+                </div>
+              ) : (
+                <Accordion>
+                  {storiesData.process_flows.map((flow: any, i: number) => (
+                    <AccordionItem key={i} title={flow.name || `Process ${i + 1}`} icon={Zap} defaultOpen={i === 0}>
+                      <ol className="list-decimal list-inside space-y-1 mb-3">
+                        {(flow.steps || []).map((s: string, j: number) => (
+                          <li key={j} className="text-xs text-text-secondary leading-relaxed">{s}</li>
+                        ))}
+                      </ol>
+                      {flow.diagram && (
+                        <div className="rounded-lg bg-dark-bg p-3 overflow-x-auto">
+                          <pre className="text-[10px] font-mono text-text-muted whitespace-pre-wrap">{flow.diagram}</pre>
+                        </div>
+                      )}
+                    </AccordionItem>
+                  ))}
+                  {storiesData.business_workflows.length > 0 && (
+                    <AccordionItem title="Business Workflows" icon={Briefcase}>
+                      <BulletList items={storiesData.business_workflows} />
+                    </AccordionItem>
+                  )}
+                  {storiesData.validation_rules.length > 0 && (
+                    <AccordionItem title="Validation Rules" icon={CheckCircle2}>
+                      <BulletList items={storiesData.validation_rules} />
+                    </AccordionItem>
+                  )}
+                  {storiesData.exception_handling.length > 0 && (
+                    <AccordionItem title="Exception Handling" icon={AlertTriangle}>
+                      <BulletList items={storiesData.exception_handling} />
+                    </AccordionItem>
+                  )}
+                </Accordion>
+              )}
+            </Card>
+          )}
+
+          {/* Risk & Metrics tab */}
+          {activeTab === 'risks' && (
+            <Card>
+              {storiesData.risk_analysis.length === 0 && storiesData.success_metrics.length === 0 ? (
+                <div className="py-8 text-center">
+                  <AlertTriangle className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+                  <p className="text-sm text-text-muted">No risk analysis or success metrics generated yet.</p>
+                </div>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div>
+                    <h4 className="text-xs font-semibold uppercase tracking-wide text-text-muted mb-2">Risk Analysis</h4>
+                    <div className="space-y-2">
+                      {storiesData.risk_analysis.map((r: any, i: number) => (
+                        <div key={i} className="rounded-lg border border-status-warning/20 bg-status-warning/5 p-3">
+                          <p className="text-xs font-medium text-text-primary mb-1">{r.risk}</p>
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-dark-border text-text-muted">likelihood: {r.likelihood || 'medium'}</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-dark-border text-text-muted">impact: {r.impact || 'medium'}</span>
+                          </div>
+                          {r.mitigation && <p className="text-[11px] text-text-secondary"><span className="text-text-primary font-medium">Mitigation:</span> {r.mitigation}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-semibold uppercase tracking-wide text-text-muted mb-2">Success Metrics</h4>
+                    <div className="space-y-2">
+                      {storiesData.success_metrics.map((m: any, i: number) => (
+                        <div key={i} className="rounded-lg bg-dark-bg p-3">
+                          <p className="text-xs font-medium text-text-primary">{m.metric}</p>
+                          {m.target && <p className="text-[11px] text-status-success mt-0.5">Target: {m.target}</p>}
+                          {m.measurement_method && <p className="text-[10px] text-text-muted mt-0.5">{m.measurement_method}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </Card>
           )}
         </>
       )}

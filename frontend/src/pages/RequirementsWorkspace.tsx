@@ -36,6 +36,7 @@ import {
   Boxes,
 } from 'lucide-react';
 import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Accordion, AccordionItem, BulletList as AccordionBulletList } from '../components/ui/Accordion';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
 import { buildApiUrl, fastApiRequest } from '../lib/api';
@@ -103,7 +104,7 @@ function parseContent(raw: string | Record<string, unknown>): Record<string, unk
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function RequirementsWorkspace() {
-  const [activeTab, setActiveTab] = useState<'editor' | 'functional' | 'non-functional' | 'risks' | 'dependencies' | 'acceptance'>('editor');
+  const [activeTab, setActiveTab] = useState<'editor' | 'functional' | 'non-functional' | 'risks' | 'dependencies' | 'acceptance' | 'roles'>('editor');
   const [requirementText, setRequirementText] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValues, setEditValues] = useState<Partial<Requirement>>({});
@@ -194,6 +195,10 @@ export function RequirementsWorkspace() {
       status: String(ac.status || 'pending'),
     }));
   }, [reqData]);
+
+  const userRoles = reqData?.user_roles || [];
+  const traceability = reqData?.traceability || [];
+  const errorScenarios = reqData?.error_scenarios || [];
 
   // Metrics
   const totalFunctional = functionalReqs.length;
@@ -345,6 +350,7 @@ export function RequirementsWorkspace() {
               { id: 'risks', label: 'Risks', icon: AlertTriangle },
               { id: 'dependencies', label: 'Dependencies', icon: GitBranch },
               { id: 'acceptance', label: 'Acceptance Criteria', icon: CheckCircle2 },
+              { id: 'roles', label: 'Roles & Traceability', icon: Boxes },
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -617,6 +623,71 @@ export function RequirementsWorkspace() {
                     </div>
                   ))}
                 </div>
+              )}
+            </Card>
+          )}
+
+          {/* Roles & Traceability tab */}
+          {activeTab === 'roles' && (
+            <Card>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="section-title mb-0">Roles & Traceability</h3>
+                <span className="text-xs text-text-muted">{userRoles.length} roles · {traceability.length} traced · {errorScenarios.length} error scenarios</span>
+              </div>
+              {userRoles.length === 0 && traceability.length === 0 && errorScenarios.length === 0 ? (
+                <div className="py-8 text-center">
+                  <Boxes className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+                  <p className="text-sm text-text-muted">No user roles or traceability data generated yet.</p>
+                </div>
+              ) : (
+                <Accordion>
+                  {userRoles.length > 0 && (
+                    <AccordionItem title="User Roles" icon={Boxes} defaultOpen badge={<span className="text-[10px] text-text-muted">{userRoles.length}</span>}>
+                      <div className="space-y-3">
+                        {userRoles.map((role: any, i: number) => (
+                          <div key={i} className="rounded-lg bg-dark-bg p-3">
+                            <p className="text-sm font-medium text-text-primary">{role.name}</p>
+                            {role.description && <p className="text-xs text-text-secondary mt-0.5">{role.description}</p>}
+                            <div className="mt-2"><AccordionBulletList items={role.permissions} /></div>
+                          </div>
+                        ))}
+                      </div>
+                    </AccordionItem>
+                  )}
+                  {traceability.length > 0 && (
+                    <AccordionItem title="Traceability Matrix" icon={GitBranch} badge={<span className="text-[10px] text-text-muted">{traceability.length}</span>}>
+                      <div className="space-y-2">
+                        {traceability.map((t: any, i: number) => (
+                          <div key={i} className="rounded-lg bg-dark-bg p-3 text-xs">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="font-mono text-ey-yellow">{t.requirement_id}</span>
+                              {t.source && <span className="text-text-muted">Source: {t.source}</span>}
+                            </div>
+                            {t.business_goal && <p className="text-text-secondary">{t.business_goal}</p>}
+                            {t.related_requirements?.length > 0 && (
+                              <p className="text-[10px] text-text-muted mt-1">Related: {t.related_requirements.join(', ')}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </AccordionItem>
+                  )}
+                  {errorScenarios.length > 0 && (
+                    <AccordionItem title="Error Scenarios" icon={AlertTriangle} badge={<span className="text-[10px] text-text-muted">{errorScenarios.length}</span>}>
+                      <div className="space-y-2">
+                        {errorScenarios.map((e: any, i: number) => (
+                          <div key={i} className="rounded-lg bg-dark-bg p-3 text-xs">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="font-mono text-ey-yellow">{e.requirement_id}</span>
+                            </div>
+                            <p className="text-text-primary">{e.scenario}</p>
+                            {e.expected_behavior && <p className="text-text-secondary mt-1"><span className="text-text-primary font-medium">Expected:</span> {e.expected_behavior}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    </AccordionItem>
+                  )}
+                </Accordion>
               )}
             </Card>
           )}

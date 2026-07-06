@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pydantic import BaseModel
-from .llm_client import OllamaClient, call_and_validate
+from .llm_service import LLMService
 
 
 # ---------------------------------
@@ -96,8 +96,8 @@ Generate the structured security architecture output now.
 # ---------------------------------
 
 class SecurityArchitectAgent:
-    def __init__(self, client: OllamaClient | None = None):
-        self.client = client or OllamaClient()
+    def __init__(self, llm: LLMService | None = None, *, db=None, project_id: int | None = None):
+        self.llm = llm or LLMService(db=db, project_id=project_id, role="architect")
 
     def run(
         self,
@@ -108,8 +108,7 @@ class SecurityArchitectAgent:
         if not project_description:
             raise ValueError("Project description cannot be empty")
 
-        result = call_and_validate(
-            client=self.client,
+        result = self.llm.generate_json(
             system=SECURITY_AGENT_SYSTEM_PROMPT,
             prompt=build_security_prompt(project_description, architecture),
             schema=SecurityArchitectureOutput,
@@ -119,29 +118,3 @@ class SecurityArchitectAgent:
             raise ValueError("No security architecture generated")
 
         return result
-
-
-# ---------------------------------
-# Test Run Block
-# ---------------------------------
-
-if __name__ == "__main__":
-    agent = SecurityArchitectAgent()
-
-    mock_description = "E-commerce platform for selling handmade crafts"
-    mock_architecture = {
-        "pattern": "Microservices",
-        "apiStyle": "REST",
-        "services": ["User Service", "Product Service", "Payment Service"]
-    }
-
-    print("Running Security Architect Agent Test...")
-
-    try:
-        output = agent.run(mock_description, mock_architecture)
-        print("\n--- TEST SUCCESSFUL ---")
-        print(output.model_dump_json(indent=2))
-
-    except Exception as e:
-        print("\n--- TEST FAILED ---")
-        print(f"Error: {e}")

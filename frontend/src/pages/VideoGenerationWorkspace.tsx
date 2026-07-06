@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useReducer } from 'react';
+import { useState, useEffect, useRef, useCallback, useReducer, useMemo } from 'react';
 import { fastApiRequest, FASTAPI_BASE_URL } from '../lib/api';
 import { useProjectArtifacts } from '../lib/useProjectArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
@@ -15,7 +15,7 @@ import {
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type SlideLayout = 'title' | 'content' | 'two_column' | 'quote' | 'metric' | 'closing';
-type ThemeId = 'ey_dark' | 'ey_light' | 'mckinsey' | 'minimal';
+type ThemeId = 'ey_dark' | 'ey_light' | 'mckinsey' | 'minimal' | 'government' | 'startup' | 'healthcare';
 type GenMode = 'presentation_only' | 'video_only' | 'presentation_video';
 type VoiceId = 'samantha' | 'alex' | 'victoria' | 'daniel' | 'karen' | 'moira' | 'tom';
 type VideoMode = 'slides' | 'avatar' | 'animated' | 'whiteboard';
@@ -30,6 +30,7 @@ interface Slide {
   speaker_notes: string;
   layout: SlideLayout;
   duration: number;
+  diagram_image?: string;
 }
 
 interface StoryboardFrame {
@@ -55,6 +56,8 @@ interface RenderJob {
   eta_seconds: number | null;
   fallback_used: boolean;
   avatar_error: string | null;
+  avatar_provider_used: string | null;
+  subtitles_available: boolean;
   error: string | null;
 }
 
@@ -85,6 +88,9 @@ const THEMES: Record<ThemeId, { label: string; bg: string; accent: string; title
   ey_light:  { label: 'EY Light',      bg: '#FFFFFF', accent: '#FFE600', title: '#2E2E38', body: '#4A4A58', muted: '#888898', bar: '#FFE600', header: '#2E2E38', footer: '#F2F2F5', stripe: '#F8F8FA', headerText: '#FFFFFF' },
   mckinsey:  { label: 'McKinsey Blue', bg: '#FFFFFF', accent: '#003865', title: '#003865', body: '#232332', muted: '#7878A0', bar: '#003865', header: '#003865', footer: '#E8EEF5', stripe: '#F4F7FA', headerText: '#FFFFFF' },
   minimal:   { label: 'Minimal',       bg: '#111118', accent: '#6366F1', title: '#FFFFFF', body: '#C0C0D8', muted: '#606080', bar: '#6366F1', header: '#0A0A12', footer: '#1C1C2D', stripe: '#1A1A28', headerText: '#FFFFFF' },
+  government: { label: 'Government',  bg: '#FFFFFF', accent: '#B08D57', title: '#0B2447', body: '#2B333B', muted: '#5C6B7A', bar: '#B08D57', header: '#0B2447', footer: '#F1F3F6', stripe: '#EEF1F5', headerText: '#FFFFFF' },
+  startup:    { label: 'Startup',      bg: '#0F0F1A', accent: '#7C5CFF', title: '#FFFFFF', body: '#D6D6E6', muted: '#8A8AA3', bar: '#7C5CFF', header: '#0A0A14', footer: '#181828', stripe: '#181828', headerText: '#FFFFFF' },
+  healthcare: { label: 'Healthcare',   bg: '#FFFFFF', accent: '#0E6E5C', title: '#173F3A', body: '#2E4A45', muted: '#6B8A85', bar: '#0E6E5C', header: '#0E6E5C', footer: '#F0F7F6', stripe: '#EAF4F2', headerText: '#FFFFFF' },
 };
 
 const LAYOUTS: Array<{ id: SlideLayout; label: string; icon: any }> = [
@@ -599,6 +605,24 @@ export function VideoGenerationWorkspace() {
   const [tab, setTab] = useState<'edit' | 'render' | 'video'>('edit');
   const [rightPanel, setRightPanel] = useState<'layout' | 'ai' | 'chat' | 'voice' | 'avatar'>('layout');
 
+  // Slide-range selection for video generation — defaults to "all slides"
+  // (null) so existing whole-deck render behavior is unchanged unless the
+  // user explicitly narrows the selection.
+  const [selectedSlideIndices, setSelectedSlideIndices] = useState<Set<number> | null>(null);
+  const isSlideSelected = useCallback((i: number) => !selectedSlideIndices || selectedSlideIndices.has(i), [selectedSlideIndices]);
+  const toggleSlideSelected = useCallback((i: number) => {
+    setSelectedSlideIndices(prev => {
+      const base = prev ?? new Set(slides.map((_, idx) => idx));
+      const next = new Set(base);
+      if (next.has(i)) next.delete(i); else next.add(i);
+      return next;
+    });
+  }, [slides]);
+  const selectedSlides = useMemo(
+    () => selectedSlideIndices ? slides.filter((_, i) => selectedSlideIndices.has(i)) : slides,
+    [slides, selectedSlideIndices]
+  );
+
   // AI Presentation Chat
   const [chatMessages, setChatMessages] = useState<Array<{ role: 'user' | 'assistant'; text: string }>>([
     { role: 'assistant', text: 'Hi! Tell me how to change your presentation. Try:\n• "Change slide 3 to executive style"\n• "Add a slide after slide 6"\n• "Rewrite this slide technically"\n• "Shorten this content"\n• "Change theme to McKinsey"\n• "Regenerate slide 2"' },
@@ -627,6 +651,7 @@ export function VideoGenerationWorkspace() {
   const [resolution, setResolution] = useState<'720p'|'1080p'|'1440p'>('1080p');
   const [fps, setFps] = useState(30);
   const [captions, setCaptions] = useState(false);
+  const [generateSubtitleFiles, setGenerateSubtitleFiles] = useState(false);
   const [cameraMotion, setCameraMotion] = useState(true);
 
   // Render job
@@ -636,13 +661,15 @@ export function VideoGenerationWorkspace() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Previously generated video (persisted in DB)
-  const [existingVideo, setExistingVideo] = useState<{ video_artifact_id: number; duration_seconds: number; mode?: string; slide_count?: number } | null>(null);
+  const [existingVideo, setExistingVideo] = useState<{ video_artifact_id: number; avatar_artifact_id?: number | null; duration_seconds: number; mode?: string; slide_count?: number } | null>(null);
 
   // UI state
   const [loadingSlides, setLoadingSlides] = useState(true);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [showDiagram, setShowDiagram] = useState(false);
+  const [showScript, setShowScript] = useState(false);
+  const [scriptDraft, setScriptDraft] = useState('');
   const [aiActionLoading, setAiActionLoading] = useState<AiAction | null>(null);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [pdfMode, setPdfMode] = useState(false); // when true, render from PDF instead of slides
@@ -671,11 +698,11 @@ export function VideoGenerationWorkspace() {
   // ── Load previous video from DB ────────────────────────────────────────────
   useEffect(() => {
     if (!projectId) return;
-    fastApiRequest<{ found: boolean; video_artifact_id?: number; duration_seconds?: number; mode?: string; slide_count?: number }>(
+    fastApiRequest<{ found: boolean; video_artifact_id?: number; avatar_artifact_id?: number | null; duration_seconds?: number; mode?: string; slide_count?: number }>(
       `/video/render/latest/${projectId}`
     ).then(res => {
       if (res.found && res.video_artifact_id) {
-        setExistingVideo({ video_artifact_id: res.video_artifact_id, duration_seconds: res.duration_seconds || 0, mode: res.mode, slide_count: res.slide_count });
+        setExistingVideo({ video_artifact_id: res.video_artifact_id, avatar_artifact_id: res.avatar_artifact_id, duration_seconds: res.duration_seconds || 0, mode: res.mode, slide_count: res.slide_count });
       }
     }).catch(() => {});
   }, [projectId]);
@@ -742,7 +769,7 @@ export function VideoGenerationWorkspace() {
           addToast('Video rendered successfully!', 'success');
           setTab('video');
           if (status.video_artifact_id) {
-            setExistingVideo({ video_artifact_id: status.video_artifact_id, duration_seconds: status.duration_seconds });
+            setExistingVideo({ video_artifact_id: status.video_artifact_id, avatar_artifact_id: status.avatar_artifact_id, duration_seconds: status.duration_seconds });
           }
         } else if (status.status === 'failed') {
           clearInterval(pollRef.current!);
@@ -783,6 +810,77 @@ export function VideoGenerationWorkspace() {
   }, [setSlides]);
 
   // ── AI action ─────────────────────────────────────────────────────────────
+  // Editable narration script, scoped to the currently-selected slide range.
+  const scriptSlideMarker = (i: number, title: string) => `=== Slide ${i + 1}: ${title || 'Untitled'} ===`;
+  const openScriptEditor = useCallback(() => {
+    const indices = selectedSlideIndices ? [...selectedSlideIndices].sort((a, b) => a - b) : slides.map((_, i) => i);
+    const draft = indices.map(i => `${scriptSlideMarker(i, slides[i]?.title)}\n${slides[i]?.speaker_notes || ''}`).join('\n\n');
+    setScriptDraft(draft);
+    setShowScript(true);
+  }, [slides, selectedSlideIndices]);
+
+  // Strips a leading "=== Slide N: Title ===" marker line if still present,
+  // but never requires it — editing a script by hand (shortening, deleting
+  // the header line, retyping) must not silently fail to save.
+  const stripMarkerLine = (block: string) => block.replace(/^===\s*Slide\s+\d+:[^\n]*===\s*\n?/i, '').trim();
+
+  const saveScriptEditor = useCallback(() => {
+    const indices = selectedSlideIndices ? [...selectedSlideIndices].sort((a, b) => a - b) : slides.map((_, i) => i);
+
+    // Single slide being edited: no need to parse markers at all — the
+    // whole textarea (minus any leftover header line) IS that slide's script.
+    if (indices.length === 1) {
+      const text = stripMarkerLine(scriptDraft.trim());
+      const idx = indices[0];
+      setSlides(prev => prev.map((s, i) => i === idx ? { ...s, speaker_notes: text } : s));
+      setShowScript(false);
+      addToast('Narration updated', 'success');
+      return;
+    }
+
+    // Multiple slides: split on marker lines when present...
+    let blocks = scriptDraft.split(/\n(?=\s*===\s*Slide\s+\d+:)/i).map(b => b.trim()).filter(Boolean);
+    let notesByIndex = new Map<number, string>();
+    blocks.forEach(block => {
+      const match = block.match(/^===\s*Slide\s+(\d+):[^\n]*===\s*\n?([\s\S]*)$/i);
+      if (match) notesByIndex.set(parseInt(match[1], 10) - 1, match[2].trim());
+    });
+
+    // ...but if markers were edited away and nothing parsed, fall back to
+    // mapping blocks to the selected slides by position (best effort) rather
+    // than silently discarding the user's edits.
+    if (notesByIndex.size === 0 && blocks.length === indices.length) {
+      indices.forEach((idx, pos) => notesByIndex.set(idx, stripMarkerLine(blocks[pos])));
+    }
+
+    if (notesByIndex.size === 0) {
+      addToast("Couldn't tell which slide each part of the script belongs to — keep each slide's \"=== Slide N ===\" header line intact, or edit one slide at a time.", 'error');
+      return;
+    }
+
+    setSlides(prev => prev.map((s, i) => notesByIndex.has(i) ? { ...s, speaker_notes: notesByIndex.get(i)! } : s));
+    setShowScript(false);
+    addToast(`Updated narration for ${notesByIndex.size} slide${notesByIndex.size === 1 ? '' : 's'}`, 'success');
+  }, [scriptDraft, slides, selectedSlideIndices, setSlides, addToast]);
+
+  // Regenerate just the active slide's diagram — never touches other slides.
+  const [diagramRegenLoading, setDiagramRegenLoading] = useState(false);
+  const regenerateSlideDiagram = useCallback(async () => {
+    if (!slides[activeIdx]) return;
+    setDiagramRegenLoading(true);
+    try {
+      const res = await fastApiRequest<{ success: boolean; diagram_image?: string }>('/media-studio/slide-diagram', {
+        method: 'POST',
+        body: { slide: slides[activeIdx] },
+      });
+      if (res.success && res.diagram_image) {
+        setSlides(prev => prev.map((s, i) => i === activeIdx ? { ...s, diagram_image: res.diagram_image } as Slide : s));
+        addToast('Diagram regenerated', 'success');
+      }
+    } catch { addToast('Diagram regeneration failed', 'error'); }
+    finally { setDiagramRegenLoading(false); }
+  }, [slides, activeIdx, setSlides, addToast]);
+
   const applyAiAction = useCallback(async (action: AiAction) => {
     if (!slides[activeIdx]) return;
     setAiActionLoading(action);
@@ -968,29 +1066,27 @@ export function VideoGenerationWorkspace() {
   }, [slides, activeIdx, applyAiActionToIndex, setSlides]);
 
   // ── PDF → Video render ────────────────────────────────────────────────────
-  const startPdfRender = useCallback(async () => {
-    if (!projectId || !pdfFile) return;
-    setRendering(true); setRenderJob(null);
+  // Imports a PDF into editable slides ONLY — does not start a video render.
+  // That's deliberate: one slide is generated per PDF page, so the user can
+  // pick exactly which page(s) to render afterward via the slide-strip
+  // checkboxes, instead of the whole deck rendering immediately.
+  const [pdfImporting, setPdfImporting] = useState(false);
+  const startPdfRender = useCallback(async (fileOverride?: File) => {
+    const file = fileOverride || pdfFile;
+    if (!projectId || !file) return;
+    setPdfImporting(true);
     try {
       const form = new FormData();
-      form.append('pdf_file', pdfFile);
+      form.append('pdf_file', file);
       form.append('project_id', String(Number(projectId)));
-      form.append('mode', videoMode);
       form.append('theme_id', themeId);
-      form.append('voice_id', voiceId);
-      form.append('voice_speed', String(voiceSpeed));
-      form.append('avatar_id', selectedAvatar);
-      form.append('presenter_type', presenterType);
-      form.append('gen_mode', genMode);
-      addToast('Reading document and generating the presentation…', 'info');
+      form.append('start_render', 'false');
+      addToast('Reading document and generating slides…', 'info');
       const response = await fetch(`${FASTAPI_BASE_URL}/video/render/from-pdf`, {
         method: 'POST', credentials: 'include', body: form,
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'PDF render failed');
-      // The AI-understood, fully-narrated slides come back immediately so the
-      // editable script/editor reflects them right away — no need to wait for
-      // the video render job to reload the deck.
+      if (!response.ok) throw new Error(data.detail || 'PDF understanding failed');
       if (Array.isArray(data.slides) && data.slides.length) {
         const asSlides: Slide[] = data.slides.map((s: any, i: number) => ({
           id: `pdf-${i}-${Date.now()}`, title: s.title || `Slide ${i + 1}`,
@@ -1000,17 +1096,21 @@ export function VideoGenerationWorkspace() {
         }));
         setSlides(asSlides);
         setActiveIdx(0);
+        setSelectedSlideIndices(null); // default to "all selected"; user narrows from here
         if (projectId) localStorage.setItem(`slides_${projectId}`, JSON.stringify(asSlides));
       }
-      setJobId(data.job_id);
+      // The PDF is now imported into editable slides — reset pdf-attach state
+      // so the Generate button goes back to its normal (already-loaded-slides)
+      // render behavior instead of re-triggering a PDF import.
+      setPdfFile(null); setPdfMode(false);
       setShowGenerateModal(false);
-      setTab('render');
-      addToast(`PDF understood — ${data.slide_count} slides generated, rendering video…`, 'success');
+      addToast(`${data.slide_count} slides generated from the PDF — select which to render, then hit Generate.`, 'success');
     } catch (e) {
-      setRendering(false);
-      addToast(e instanceof Error ? e.message : 'Failed to start render', 'error');
+      addToast(e instanceof Error ? e.message : 'Failed to read PDF', 'error');
+    } finally {
+      setPdfImporting(false);
     }
-  }, [projectId, pdfFile, videoMode, themeId, voiceId, voiceSpeed, selectedAvatar, presenterType, genMode, addToast]);
+  }, [projectId, pdfFile, themeId, addToast]);
 
   // ── Import an existing .pptx as editable slides ───────────────────────────
   const handleImportPptx = useCallback(async (file: File) => {
@@ -1064,8 +1164,10 @@ export function VideoGenerationWorkspace() {
   }, [voiceId, voiceSpeed, voicePitch, voiceVolume, voiceEmotion, narrationStyle, voicePause, addToast]);
 
   // ── Start render ──────────────────────────────────────────────────────────
+  // Note: PDFs are imported into editable slides immediately on file select
+  // (startPdfRender), not deferred to this Generate click — by the time this
+  // runs, any attached PDF has already become part of `slides`.
   const startRender = useCallback(async () => {
-    if (pdfMode && pdfFile) { startPdfRender(); return; }
     if (!projectId) return;
     setRendering(true); setRenderJob(null);
     try {
@@ -1073,11 +1175,12 @@ export function VideoGenerationWorkspace() {
         method: 'POST',
         body: {
           project_id: Number(projectId),
-          slides: slides.map(s => ({ title: s.title, subtitle: s.subtitle, content: s.content, speaker_notes: s.speaker_notes, layout: s.layout, duration: s.duration })),
+          slides: selectedSlides.map(s => ({ title: s.title, subtitle: s.subtitle, content: s.content, speaker_notes: s.speaker_notes, layout: s.layout, duration: s.duration })),
           mode: videoMode, theme_id: themeId, voice_id: voiceId, voice_speed: voiceSpeed,
           avatar_id: selectedAvatar, gen_mode: genMode,
           presenter_type: presenterType, presenter_position: presenterPosition,
           resolution, fps, captions, camera_motion: cameraMotion,
+          generate_subtitle_files: generateSubtitleFiles,
           voice: { speed: voiceSpeed, pitch: voicePitch, volume: voiceVolume, emotion: voiceEmotion,
                    style: narrationStyle, pause: voicePause, emphasis: voiceEmphasis },
         },
@@ -1090,16 +1193,48 @@ export function VideoGenerationWorkspace() {
       setRendering(false);
       addToast(e instanceof Error ? e.message : 'Failed to start render', 'error');
     }
-  }, [projectId, pdfMode, pdfFile, slides, videoMode, themeId, voiceId, voiceSpeed, voicePitch, voiceVolume, voiceEmotion, presenterType, presenterPosition, narrationStyle, voicePause, voiceEmphasis, resolution, fps, captions, cameraMotion, selectedAvatar, genMode, addToast, startPdfRender]);
+  }, [projectId, selectedSlides, videoMode, themeId, voiceId, voiceSpeed, voicePitch, voiceVolume, voiceEmotion, presenterType, presenterPosition, narrationStyle, voicePause, voiceEmphasis, resolution, fps, captions, cameraMotion, generateSubtitleFiles, selectedAvatar, genMode, addToast]);
 
   const activeSlide = slides[activeIdx];
   const theme = THEMES[themeId];
-  const displayVideoId = renderJob?.video_artifact_id ?? existingVideo?.video_artifact_id ?? null;
+  // Prefer the AI Avatar (lip-synced) artifact over the plain narrated
+  // slideshow when both exist — otherwise a successful avatar render is
+  // silently invisible to the user, who only ever sees the fallback video.
+  const displayVideoId = renderJob?.avatar_artifact_id ?? renderJob?.video_artifact_id
+    ?? existingVideo?.avatar_artifact_id ?? existingVideo?.video_artifact_id ?? null;
   const displayDuration = renderJob?.duration_seconds ?? existingVideo?.duration_seconds ?? 0;
 
   if (loadingSlides) return (
     <div className="flex h-full items-center justify-center py-24">
       <Loader2 className="h-8 w-8 animate-spin text-ey-yellow" />
+    </div>
+  );
+
+  // Empty state — no slides yet (fresh project, or nothing generated). Give
+  // PDF-generation and PPTX-import equal, prominent top-level entry points
+  // instead of burying them inside the Generate modal.
+  if (slides.length === 0) return (
+    <div className="flex h-full flex-col items-center justify-center gap-6 py-24 text-center">
+      <Film className="h-12 w-12 text-ey-yellow" />
+      <div>
+        <h2 className="text-xl font-bold text-text-primary">Start a Presentation</h2>
+        <p className="text-sm text-text-muted mt-1">Generate slides from a PDF, import an existing deck, or start from scratch.</p>
+      </div>
+      <div className="flex items-center gap-4">
+        <label className="btn-primary flex items-center gap-2 cursor-pointer">
+          {pdfImporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
+          Generate from PDF
+          <input type="file" accept=".pdf" className="sr-only"
+            onChange={e => { const f = e.target.files?.[0] || null; if (f) { setPdfFile(f); setPdfMode(true); startPdfRender(f); } }} />
+        </label>
+        <label className="btn-secondary flex items-center gap-2 cursor-pointer">
+          {pptxImporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Presentation className="h-4 w-4" />}
+          Import PPTX
+          <input type="file" accept=".pptx" className="sr-only"
+            onChange={e => { const f = e.target.files?.[0] || null; if (f) handleImportPptx(f); }} />
+        </label>
+        <button onClick={() => setSlides(getDefaultSlides())} className="btn-ghost text-sm">Start from scratch</button>
+      </div>
     </div>
   );
 
@@ -1152,13 +1287,24 @@ export function VideoGenerationWorkspace() {
           )}
 
           <div className="h-5 w-px bg-dark-border mx-1" />
-          <button onClick={() => setShowDiagram(true)} className="btn-ghost text-sm flex items-center gap-1.5">
-            <GitBranch className="h-4 w-4" />Diagram
+          {/* Secondary editing aids — visually lighter than the primary Generate CTA
+              so the toolbar communicates sequence (edit first, generate next) rather
+              than presenting every action as equal weight. */}
+          <button onClick={() => setShowDiagram(true)} className="btn-ghost text-xs flex items-center gap-1.5 text-text-muted hover:text-text-primary">
+            <GitBranch className="h-3.5 w-3.5" />Diagram
           </button>
-          <button onClick={() => setShowExport(true)} className="btn-ghost text-sm flex items-center gap-1.5">
-            <Download className="h-4 w-4" />Export
+          <button onClick={openScriptEditor} disabled={slides.length === 0} className="btn-ghost text-xs flex items-center gap-1.5 text-text-muted hover:text-text-primary disabled:opacity-40">
+            <FileText className="h-3.5 w-3.5" />Script
           </button>
-          <button onClick={() => setShowGenerateModal(true)} disabled={rendering || slides.length === 0} className="btn-primary text-sm">
+          {/* Export only makes sense once a video actually exists — showing it
+              unconditionally implied it could be used before Generate. */}
+          {displayVideoId && (
+            <button onClick={() => setShowExport(true)} className="btn-ghost text-xs flex items-center gap-1.5 text-text-muted hover:text-text-primary">
+              <Download className="h-3.5 w-3.5" />Export
+            </button>
+          )}
+          <div className="flex-1" />
+          <button onClick={() => setShowGenerateModal(true)} disabled={rendering || slides.length === 0 || selectedSlides.length === 0} className="btn-primary text-sm">
             {rendering ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Rendering…</> : <><Sparkles className="mr-2 h-4 w-4" />Generate</>}
           </button>
         </div>
@@ -1171,7 +1317,10 @@ export function VideoGenerationWorkspace() {
           {/* Slide strip */}
           <div className="flex flex-col w-44 flex-shrink-0 border-r border-dark-border bg-dark-card">
             <div className="flex items-center justify-between px-3 py-2 border-b border-dark-border flex-shrink-0">
-              <span className="text-xs text-text-muted">{slides.length} slides</span>
+              <span className="text-xs text-text-muted">
+                {slides.length} slides
+                {selectedSlides.length !== slides.length && ` · ${selectedSlides.length} selected`}
+              </span>
               <button onClick={addSlide} className="rounded p-1 text-text-muted hover:text-ey-yellow hover:bg-dark-bg">
                 <Plus className="h-4 w-4" />
               </button>
@@ -1179,6 +1328,10 @@ export function VideoGenerationWorkspace() {
             <div className="flex-1 overflow-y-auto p-2 space-y-2">
               {slides.map((slide, i) => (
                 <div key={slide.id} className="relative group">
+                  <label className="absolute top-0.5 left-0.5 z-10 flex items-center justify-center h-4 w-4 rounded bg-dark-card/90"
+                    onClick={e => e.stopPropagation()} title="Include this slide in video generation">
+                    <input type="checkbox" className="h-3 w-3 accent-ey-yellow" checked={isSlideSelected(i)} onChange={() => toggleSlideSelected(i)} />
+                  </label>
                   <SlideThumbnail slide={slide} themeId={themeId} slideNum={i+1} total={slides.length} active={i===activeIdx} onClick={() => setActiveIdx(i)} />
                   <div className="absolute top-0.5 right-0.5 hidden group-hover:flex gap-0.5 bg-dark-card/90 rounded p-0.5">
                     <button onClick={e => { e.stopPropagation(); setActiveIdx(i); setTimeout(duplicateSlide, 0); }} className="rounded p-0.5 text-text-muted hover:text-text-primary text-[10px]" title="Duplicate">⧉</button>
@@ -1201,6 +1354,11 @@ export function VideoGenerationWorkspace() {
                   <button onClick={() => setActiveIdx(Math.max(0, activeIdx-1))} disabled={activeIdx===0} className="btn-ghost p-2 disabled:opacity-30"><ChevronLeft className="h-5 w-5" /></button>
                   <span className="text-sm text-text-muted">{activeIdx+1} / {slides.length}</span>
                   <button onClick={() => setActiveIdx(Math.min(slides.length-1, activeIdx+1))} disabled={activeIdx===slides.length-1} className="btn-ghost p-2 disabled:opacity-30"><ChevronRight className="h-5 w-5" /></button>
+                  <div className="h-4 w-px bg-dark-border mx-1" />
+                  <button onClick={regenerateSlideDiagram} disabled={diagramRegenLoading} className="btn-ghost text-xs flex items-center gap-1.5 disabled:opacity-50" title="Regenerate this slide's diagram only">
+                    {diagramRegenLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitBranch className="h-3.5 w-3.5" />}
+                    Regenerate Diagram
+                  </button>
                 </div>
               </div>
             )}
@@ -1210,12 +1368,15 @@ export function VideoGenerationWorkspace() {
           {/* Right panel */}
           <div className="flex flex-col w-64 flex-shrink-0 border-l border-dark-border bg-dark-card overflow-hidden">
             <div className="flex border-b border-dark-border flex-shrink-0">
+              {/* Tab order mirrors the natural configuration sequence: slide
+                  layout, then presenter (voice/avatar), then exploratory
+                  tools (AI actions, chat) last. */}
               {([
                 { id: 'layout', label: 'Layout', icon: Layout },
-                { id: 'ai',     label: 'AI',     icon: Sparkles },
-                { id: 'chat',   label: 'Chat',   icon: MessageSquare },
                 { id: 'voice',  label: 'Voice',  icon: Mic },
                 { id: 'avatar', label: 'Avatar', icon: User },
+                { id: 'ai',     label: 'AI',     icon: Sparkles },
+                { id: 'chat',   label: 'Chat',   icon: MessageSquare },
               ] as const).map(({ id, label, icon: Icon }) => (
                 <button key={id} onClick={() => setRightPanel(id)}
                   className={`flex-1 flex flex-col items-center gap-0.5 py-2 text-[10px] border-b-2 transition-colors ${rightPanel===id ? 'border-ey-yellow text-ey-yellow' : 'border-transparent text-text-muted hover:text-text-primary'}`}>
@@ -1481,6 +1642,10 @@ export function VideoGenerationWorkspace() {
                       <span>Camera Motion (Ken Burns)</span>
                       <input type="checkbox" checked={cameraMotion} onChange={e => setCameraMotion(e.target.checked)} className="accent-ey-yellow h-4 w-4" />
                     </label>
+                    <label className="flex items-center justify-between text-xs text-text-secondary">
+                      <span>Generate Subtitle Files (.srt/.vtt)</span>
+                      <input type="checkbox" checked={generateSubtitleFiles} onChange={e => setGenerateSubtitleFiles(e.target.checked)} className="accent-ey-yellow h-4 w-4" />
+                    </label>
                   </div>
                 </div>
               )}
@@ -1545,6 +1710,23 @@ export function VideoGenerationWorkspace() {
                   <p className="text-sm text-text-secondary">
                     {renderJob.avatar_error || 'Avatar model unavailable — automatically using Slides + Voice-over.'}
                   </p>
+                </div>
+              )}
+
+              {renderJob.avatar_provider_used && (
+                <div className="flex items-center gap-2 text-xs text-text-muted px-1">
+                  <Sparkles className="h-3.5 w-3.5" />
+                  Rendered with {renderJob.avatar_provider_used === 'd-id' ? 'D-ID (cloud avatar)' : 'SadTalker (local avatar)'}
+                  {renderJob.fallback_used && renderJob.avatar_provider_used === 'sadtalker' && ' — D-ID fallback'}
+                </div>
+              )}
+
+              {renderJob.subtitles_available && (
+                <div className="flex items-center gap-3">
+                  <a href={`${FASTAPI_BASE_URL}/video/render/subtitles/${renderJob.job_id}.srt`} target="_blank" rel="noreferrer"
+                     className="btn-ghost text-xs"><Download className="mr-1 h-3 w-3" />Download .srt</a>
+                  <a href={`${FASTAPI_BASE_URL}/video/render/subtitles/${renderJob.job_id}.vtt`} target="_blank" rel="noreferrer"
+                     className="btn-ghost text-xs"><Download className="mr-1 h-3 w-3" />Download .vtt</a>
                 </div>
               )}
 
@@ -1625,7 +1807,8 @@ export function VideoGenerationWorkspace() {
 
             <div className="p-6 space-y-5 overflow-y-auto max-h-[70vh]">
 
-              {/* PDF upload option */}
+              {/* PDF upload option — imports one slide per PDF page immediately;
+                  pick which slides to render afterward via the slide strip. */}
               <div className="rounded-xl border-2 border-dashed border-dark-border bg-dark-bg p-4">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
@@ -1635,21 +1818,11 @@ export function VideoGenerationWorkspace() {
                   </div>
                   <label className="relative cursor-pointer">
                     <input ref={pdfInputRef} type="file" accept=".pdf" className="sr-only"
-                      onChange={e => { const f = e.target.files?.[0] || null; setPdfFile(f); setPdfMode(!!f); }} />
-                    <span className="btn-secondary text-xs px-3 py-1.5">Browse PDF</span>
+                      onChange={e => { const f = e.target.files?.[0] || null; if (f) startPdfRender(f); if (pdfInputRef.current) pdfInputRef.current.value = ''; }} />
+                    <span className="btn-secondary text-xs px-3 py-1.5">{pdfImporting ? 'Reading…' : 'Browse PDF'}</span>
                   </label>
                 </div>
-                {pdfFile ? (
-                  <div className="flex items-center gap-2 rounded-lg bg-ey-yellow/10 border border-ey-yellow/30 px-3 py-2">
-                    <FileText className="h-4 w-4 text-ey-yellow flex-shrink-0" />
-                    <span className="text-sm text-ey-yellow font-medium flex-1 truncate">{pdfFile.name}</span>
-                    <span className="text-xs text-text-muted">{(pdfFile.size / 1024 / 1024).toFixed(1)} MB</span>
-                    <button onClick={() => { setPdfFile(null); setPdfMode(false); if (pdfInputRef.current) pdfInputRef.current.value = ''; }}
-                      className="text-text-muted hover:text-status-error ml-1"><X className="h-3.5 w-3.5" /></button>
-                  </div>
-                ) : (
-                  <p className="text-xs text-text-muted">Upload a PDF and the system will extract slides from it, add AI narration, and render a video — no manual slide building needed.</p>
-                )}
+                <p className="text-xs text-text-muted">Upload a PDF — one slide is generated per page. Pick which page(s) to render afterward in the slide strip.</p>
               </div>
 
               {/* PPTX import option */}
@@ -1711,38 +1884,9 @@ export function VideoGenerationWorkspace() {
                     </div>
                   </div>
 
-                  {/* Voice */}
-                  <div>
-                    <p className="text-sm font-medium text-text-primary mb-3">Narrator Voice</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      {VOICES.map(v => (
-                        <button key={v.id} onClick={() => setVoiceId(v.id)}
-                          className={`flex items-center gap-2 rounded-lg border p-2.5 text-left transition-all ${voiceId===v.id ? 'border-ey-yellow bg-ey-yellow/10' : 'border-dark-border hover:bg-dark-bg'}`}>
-                          <Volume2 className={`h-4 w-4 flex-shrink-0 ${voiceId===v.id ? 'text-ey-yellow' : 'text-text-muted'}`} />
-                          <div>
-                            <p className={`text-sm font-medium ${voiceId===v.id ? 'text-ey-yellow' : 'text-text-primary'}`}>{v.label}</p>
-                            <p className="text-xs text-text-muted">{v.gender==='F'?'♀':'♂'} {v.accent}</p>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Avatar grid */}
-                  {videoMode === 'avatar' && (
-                    <div>
-                      <p className="text-sm font-medium text-text-primary mb-3">Avatar Persona</p>
-                      <div className="grid grid-cols-4 gap-2 max-h-44 overflow-y-auto">
-                        {AVATARS.map(a => (
-                          <button key={a.id} onClick={() => setSelectedAvatar(a.id)}
-                            className={`flex flex-col items-center gap-1 rounded-lg border p-2 transition-all ${selectedAvatar===a.id ? 'border-ey-yellow bg-ey-yellow/10' : 'border-dark-border hover:border-ey-yellow/30'}`}>
-                            <span className="text-xl">{a.emoji}</span>
-                            <span className={`text-[9px] text-center leading-tight ${selectedAvatar===a.id ? 'text-ey-yellow' : 'text-text-muted'}`}>{a.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                  {/* Voice/Avatar are configured in the right-hand panel's Voice/Avatar
+                      tabs, not here — this modal only confirms the current choice
+                      (see Summary below) so there's a single place to set them. */}
                 </>
               )}
 
@@ -1753,8 +1897,23 @@ export function VideoGenerationWorkspace() {
                   <span className="text-text-primary font-medium">{THEMES[themeId].label}</span> · {' '}
                   <span className="text-text-primary font-medium">{slides.length}</span> slides · {' '}
                   <span className="text-text-primary font-medium">{slides.reduce((s, sl) => s+(sl.duration||30), 0)}s</span> total
+                  {genMode !== 'presentation_only' && (
+                    <>
+                      {' '}· <span className="text-text-primary font-medium">{VOICES.find(v => v.id === voiceId)?.label ?? voiceId}</span> voice
+                      {videoMode === 'avatar' && (
+                        <>
+                          {' '}· <span className="text-text-primary font-medium">{AVATARS.find(a => a.id === selectedAvatar)?.label ?? selectedAvatar}</span> avatar
+                        </>
+                      )}
+                    </>
+                  )}
                 </p>
               </div>
+              {genMode !== 'presentation_only' && (
+                <p className="text-[11px] text-text-muted -mt-2">
+                  Change voice{videoMode === 'avatar' ? ' or avatar' : ''} in the right-hand panel before generating.
+                </p>
+              )}
             </div>
 
             <div className="flex gap-3 border-t border-dark-border px-6 py-4">
@@ -1777,6 +1936,29 @@ export function VideoGenerationWorkspace() {
       {/* Diagram */}
       {showDiagram && <DiagramGenerator projectId={projectId} onClose={() => setShowDiagram(false)}
         onInsert={code => { if (activeSlide) updateSlide(activeIdx, 'speaker_notes', (activeSlide.speaker_notes||'') + '\n\n[DIAGRAM]\n' + code); }} />}
+
+      {/* Narration script — scoped to the currently-selected slide range */}
+      {showScript && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="w-full max-w-2xl rounded-2xl border border-dark-border bg-dark-card shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between border-b border-dark-border px-6 py-4">
+              <div>
+                <h2 className="text-lg font-bold text-text-primary">Narration Script</h2>
+                <p className="text-xs text-text-muted mt-0.5">Editing {selectedSlides.length} of {slides.length} slides — edits apply per-slide when saved, before video generation.</p>
+              </div>
+              <button onClick={() => setShowScript(false)} className="rounded-lg p-2 text-text-muted hover:bg-dark-bg"><X className="h-5 w-5" /></button>
+            </div>
+            <div className="p-6 space-y-4">
+              <textarea value={scriptDraft} onChange={e => setScriptDraft(e.target.value)} rows={16}
+                className="w-full rounded-lg border border-dark-border bg-dark-bg p-3 text-sm font-mono text-text-primary focus:border-ey-yellow focus:outline-none" />
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setShowScript(false)} className="btn-secondary text-sm">Cancel</button>
+                <button onClick={saveScriptEditor} className="btn-primary text-sm">Save Script</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

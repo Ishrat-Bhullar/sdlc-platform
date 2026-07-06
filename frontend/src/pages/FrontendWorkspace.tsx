@@ -14,12 +14,14 @@ import {
   Eye,
 } from 'lucide-react';
 import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Accordion, AccordionItem, BulletList, DataTable } from '../components/ui/Accordion';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
 import type { CodeFile } from '../types/unified';
+import { Layers, Route, Boxes, ListChecks, ShieldAlert, Puzzle } from 'lucide-react';
 
 export function FrontendWorkspace() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'files' | 'structure'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'files' | 'structure' | 'architecture'>('overview');
   const [selectedFile, setSelectedFile] = useState<CodeFile | null>(null);
   const projectId = getSelectedProjectId();
   const { getGeneratedCode, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
@@ -149,6 +151,7 @@ export function FrontendWorkspace() {
           { id: 'overview', label: 'Overview', icon: Eye },
           { id: 'files', label: 'Files', icon: FileCode },
           { id: 'structure', label: 'Structure', icon: FolderTree },
+          { id: 'architecture', label: 'Full Architecture', icon: Layers },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -252,6 +255,13 @@ export function FrontendWorkspace() {
             <FolderTree className="h-5 w-5 text-ey-yellow" />
             <h3 className="text-lg font-semibold text-text-primary">Project Structure</h3>
           </div>
+          {frontendCode.folder_structure && frontendCode.folder_structure.length > 0 ? (
+            <div className="space-y-1 font-mono text-xs mb-4">
+              {frontendCode.folder_structure.map((line, idx) => (
+                <p key={idx} className="text-text-secondary">{line}</p>
+              ))}
+            </div>
+          ) : null}
           <div className="space-y-2">
             {frontendCode.modules?.map((module, idx) => (
               <div key={idx} className="flex items-center gap-2 p-2 rounded-lg bg-dark-bg">
@@ -260,6 +270,112 @@ export function FrontendWorkspace() {
               </div>
             ))}
           </div>
+        </Card>
+      )}
+
+      {/* Full Architecture tab */}
+      {activeTab === 'architecture' && (
+        <Card>
+          {!frontendCode.component_architecture?.length && !frontendCode.routing?.length && !frontendCode.api_integration_plan?.length && !frontendCode.forms?.length && !frontendCode.reusable_components?.length ? (
+            <div className="py-8 text-center">
+              <Layers className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+              <p className="text-sm text-text-muted">No detailed frontend architecture generated yet.</p>
+            </div>
+          ) : (
+            <Accordion>
+              {!!frontendCode.component_architecture?.length && (
+                <AccordionItem title="Component Architecture" icon={Boxes} defaultOpen badge={<span className="text-[10px] text-text-muted">{frontendCode.component_architecture.length}</span>}>
+                  <div className="space-y-2">
+                    {frontendCode.component_architecture.map((c, i) => (
+                      <div key={i} className="rounded-lg bg-dark-bg p-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-sm font-medium text-text-primary">{c.name}</span>
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-dark-border text-text-muted">{c.type}</span>
+                        </div>
+                        {c.responsibility && <p className="text-xs text-text-secondary">{c.responsibility}</p>}
+                        {!!c.props?.length && <p className="text-[10px] text-text-muted mt-1 font-mono">props: {c.props.join(', ')}</p>}
+                        {!!c.children?.length && <p className="text-[10px] text-text-muted font-mono">children: {c.children.join(', ')}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </AccordionItem>
+              )}
+              {!!frontendCode.routing?.length && (
+                <AccordionItem title="Routing" icon={Route} badge={<span className="text-[10px] text-text-muted">{frontendCode.routing.length}</span>}>
+                  <DataTable
+                    columns={['Path', 'Component', 'Guarded', 'Description']}
+                    rows={frontendCode.routing.map((r) => ({
+                      Path: <span className="font-mono">{r.path}</span>,
+                      Component: r.component,
+                      Guarded: r.guarded ? 'Yes' : 'No',
+                      Description: r.description,
+                    }))}
+                  />
+                </AccordionItem>
+              )}
+              {frontendCode.state_management?.approach && (
+                <AccordionItem title="State Management" icon={Layers}>
+                  <p className="text-xs text-text-primary font-medium mb-1">{frontendCode.state_management.approach}</p>
+                  {frontendCode.state_management.rationale && <p className="text-xs text-text-secondary mb-2">{frontendCode.state_management.rationale}</p>}
+                  {!!frontendCode.state_management.stores?.length && (
+                    <div className="space-y-1">
+                      {frontendCode.state_management.stores.map((s, i) => (
+                        <p key={i} className="text-[11px] text-text-secondary"><span className="text-ey-yellow font-mono">{s.name}</span> — {s.purpose}</p>
+                      ))}
+                    </div>
+                  )}
+                </AccordionItem>
+              )}
+              {!!frontendCode.api_integration_plan?.length && (
+                <AccordionItem title="API Integration Plan" icon={ListChecks} badge={<span className="text-[10px] text-text-muted">{frontendCode.api_integration_plan.length}</span>}>
+                  <DataTable
+                    columns={['Endpoint', 'Method', 'Hook', 'Error Handling']}
+                    rows={frontendCode.api_integration_plan.map((a) => ({
+                      Endpoint: <span className="font-mono">{a.endpoint}</span>,
+                      Method: a.method,
+                      Hook: <span className="font-mono">{a.hook_name}</span>,
+                      'Error Handling': a.error_handling,
+                    }))}
+                  />
+                </AccordionItem>
+              )}
+              {!!frontendCode.forms?.length && (
+                <AccordionItem title="Forms" icon={Puzzle} badge={<span className="text-[10px] text-text-muted">{frontendCode.forms.length}</span>}>
+                  <div className="space-y-2">
+                    {frontendCode.forms.map((f, i) => (
+                      <div key={i} className="rounded-lg bg-dark-bg p-3">
+                        <p className="text-sm font-medium text-text-primary mb-1">{f.name}</p>
+                        <div className="space-y-0.5">
+                          {(f.fields || []).map((field, j) => (
+                            <p key={j} className="text-[11px] text-text-secondary font-mono">{field.name}: {field.type} — {field.validation}</p>
+                          ))}
+                        </div>
+                        {f.submit_behavior && <p className="text-[10px] text-text-muted mt-1">{f.submit_behavior}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </AccordionItem>
+              )}
+              {!!frontendCode.error_handling?.length && (
+                <AccordionItem title="Error Handling" icon={ShieldAlert}>
+                  <BulletList items={frontendCode.error_handling} />
+                </AccordionItem>
+              )}
+              {!!frontendCode.reusable_components?.length && (
+                <AccordionItem title="Reusable Components" icon={Boxes} badge={<span className="text-[10px] text-text-muted">{frontendCode.reusable_components.length}</span>}>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {frontendCode.reusable_components.map((r, i) => (
+                      <div key={i} className="rounded-lg bg-dark-bg p-3">
+                        <p className="text-sm font-medium text-text-primary">{r.name}</p>
+                        {r.purpose && <p className="text-xs text-text-secondary">{r.purpose}</p>}
+                        {!!r.variants?.length && <p className="text-[10px] text-text-muted mt-1">variants: {r.variants.join(', ')}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </AccordionItem>
+              )}
+            </Accordion>
+          )}
         </Card>
       )}
     </div>

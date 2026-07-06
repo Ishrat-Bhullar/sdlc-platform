@@ -108,6 +108,7 @@ _LAYOUT_ALIASES = {
     "architecture": "architecture", "roadmap": "roadmap", "timeline": "timeline",
     "quote": "quote", "closing": "closing", "conclusion": "closing",
     "items": "items", "content": "content", "bullet-list": "items",
+    "hero": "hero", "hero_image": "hero", "vision": "hero", "statement": "hero",
 }
 
 
@@ -142,7 +143,16 @@ def _map_ai_slide_to_deck(s: dict, idx: int, project_name: str) -> dict | None:
     if idx == 0 and layout in ("", "content", "items"):
         layout = "title"
 
-    base = {"title": title, "subtitle": subtitle, "speaker_notes": notes}
+    # Carried through unchanged for every layout branch below (all spread
+    # **base) — image_prompt is the LLM-authored per-slide image prompt
+    # (empty by default, doesn't affect anything if unset); pptx_layout
+    # carries the LLM's optional typography/color overrides, applied by
+    # _header() on top of the theme defaults when present.
+    base = {
+        "title": title, "subtitle": subtitle, "speaker_notes": notes,
+        "image_prompt": s.get("image_prompt", "") or "",
+        "pptx_layout": s.get("pptx_layout") or {},
+    }
 
     def _split(b):
         parts = str(b).split(" — ") if " — " in str(b) else str(b).split(": ", 1)
@@ -158,6 +168,9 @@ def _map_ai_slide_to_deck(s: dict, idx: int, project_name: str) -> dict | None:
         return {**base, "layout": "closing", "title": title or "Thank You", "items": items}
     if layout == "quote":
         return {**base, "layout": "quote", "quote": body or title, "attribution": subtitle}
+    if layout == "hero":
+        content_text = body or (" — ".join(bullets[:2]) if bullets else "")
+        return {**base, "layout": "hero", "content": content_text}
     if layout in ("kpi_cards", "stats_grid") or (data_pts and not layout):
         stats = [{"value": str(d.get("value", "")), "label": d.get("label", ""),
                   "sub": d.get("context", "")} for d in data_pts[:4]]
@@ -247,6 +260,23 @@ def _build_from_slides(slides: list[dict], project_name: str, theme_id: str = "e
 
     is_dark = theme.get("mode") == "dark"
 
+    def _luminance(hexname: str) -> float:
+        r, g, b = _rgb(theme.get(hexname, "FFFFFF"))
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    # Hero/dark-background slides (title/section/quote/closing) use theme
+    # "accent" for badges, kickers, and subtitle text. That's correct for
+    # themes where accent is a bright color (EY yellow, government gold,
+    # startup violet, healthcare teal) — but McKinsey's "accent" is a near-
+    # black navy (051C2C), designed to read on a *light* background, and is
+    # nearly invisible against its own dark hero gradient. Fall back to
+    # "info" (a bright blue in every theme) whenever accent's luminance is
+    # too low to read on a dark surface.
+    _HERO_ACCENT = "accent" if _luminance("accent") > 60 else "info"
+
+    def hero_accent() -> RGBColor:
+        return col(_HERO_ACCENT)
+
     prs = Presentation()
     prs.slide_width = Emu(_emu(TE.CANVAS["w"]))
     prs.slide_height = Emu(_emu(TE.CANVAS["h"]))
@@ -256,6 +286,79 @@ def _build_from_slides(slides: list[dict], project_name: str, theme_id: str = "e
     def _bg(slide, hexname="bg"):
         slide.background.fill.solid()
         slide.background.fill.fore_color.rgb = col(hexname)
+
+    def _lighten(hexname: str, amount: float = 0.18) -> RGBColor:
+        """Shift a theme color toward white by `amount` (0-1). Used to derive
+        a guaranteed-visible second gradient stop programmatically, since
+        some themes' semantic "accent2" is identical to (or very close to)
+        "bg3" — a fixed named-color pairing would render as a flat, gradient-
+        less wash on those themes (confirmed: government and mckinsey both
+        have accent2 == bg3)."""
+        r, g, b = _rgb(theme.get(hexname, "2E2E38"))
+        r = int(r + (255 - r) * amount)
+        g = int(g + (255 - g) * amount)
+        b = int(b + (255 - b) * amount)
+        return RGBColor(r, g, b)
+
+    def _bg_gradient(slide, hex_from="bg3", angle=45, amount=0.22):
+        """Full-bleed two-stop gradient background — a subtle diagonal wash
+        from the theme's hero color to a programmatically lightened variant
+        of itself (guaranteed visible contrast on every theme, unlike a fixed
+        named second color) — for hero-moment slides (title/section/quote/
+        closing). Implemented as a borderless rectangle behind everything
+        else, since python-pptx's slide.background has no gradient API —
+        shapes do."""
+        rect = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0,
+                                       Emu(_emu(TE.CANVAS["w"])), Emu(_emu(TE.CANVAS["h"])))
+        rect.line.fill.background()
+        rect.shadow.inherit = False
+        rect.fill.gradient()
+        stops = rect.fill.gradient_stops
+        stops[0].color.rgb = col(hex_from)
+        stops[0].position = 0.0
+        stops[-1].color.rgb = _lighten(hex_from, amount)
+        stops[-1].position = 1.0
+        try:
+            rect.fill.gradient_angle = angle
+        except Exception:
+            pass
+        _flatten(rect)
+        # Send to back so subsequent shapes/text draw on top.
+        spTree = slide.shapes._spTree
+        spTree.remove(rect._element)
+        spTree.insert(2, rect._element)
+        return rect
+
+    def _set_alpha(shp, pct_opaque: int) -> None:
+        """Shape transparency isn't exposed by python-pptx's high-level API —
+        set it via the underlying <a:solidFill><a:srgbClr><a:alpha> XML.
+        pct_opaque: 0-100 (100 = fully opaque)."""
+        try:
+            sp = shp.fill.fore_color._xFill
+            srgb = sp.find(qn("a:srgbClr"))
+            if srgb is None:
+                return
+            alpha = srgb.makeelement(qn("a:alpha"), {"val": str(int(pct_opaque * 1000))})
+            srgb.append(alpha)
+        except Exception:
+            pass
+
+    def _decorative_blobs(slide, accent_hex="accent", accent2_hex="on_dark", corner="br"):
+        """Soft, semi-transparent overlapping circles in one corner — the
+        understated geometric-accent treatment Gamma-style decks use to keep
+        a hero slide from reading as a flat block of color. Never overlaps
+        the title-safe content area (kept to the outer ~25% of the canvas).
+        Supports all four corners: "br" | "tr" | "bl" | "tl"."""
+        w, h = TE.CANVAS["w"], TE.CANVAS["h"]
+        cx = w - 0.4 if corner in ("br", "tr") else 0.4
+        cy = h - 0.3 if corner in ("br", "bl") else 0.3
+        specs = [(2.6, 18), (1.7, 12), (1.0, 26)]
+        for size, alpha in specs:
+            o = _shape(slide, MSO_SHAPE.OVAL, cx - size / 2, cy - size / 2, size, size, fill=col(accent_hex))
+            _set_alpha(o, alpha)
+        # One small solid accent dot near the blob cluster for a crisp focal point.
+        dot = _shape(slide, MSO_SHAPE.OVAL, cx - 0.9, cy - 1.6, 0.22, 0.22, fill=col(accent2_hex))
+        _set_alpha(dot, 55)
 
     def _flatten(shp):
         """Force a flat, shadow-free shape (authentic EY/McKinsey decks are
@@ -295,6 +398,26 @@ def _build_from_slides(slides: list[dict], project_name: str, theme_id: str = "e
                      fill=col(fill), line_rgb=col(border) if border else None, line_w=0.75)
         try:  # tame the corner radius (default is huge)
             shp.adjustments[0] = 0.045
+        except Exception:
+            pass
+        return shp
+
+    def _card_glass(slide, l, t, w, h, *, tint="on_dark", alpha=16, border_alpha=35):
+        """Semi-transparent 'glass' card — for content that needs to sit on
+        top of a hero gradient/image rather than a flat theme background.
+        Uses the same alpha-XML technique as _decorative_blobs/_set_alpha."""
+        shp = _shape(slide, MSO_SHAPE.ROUNDED_RECTANGLE, l, t, w, h,
+                     fill=col(tint), line_rgb=col(tint), line_w=0.75)
+        try:
+            shp.adjustments[0] = 0.06
+        except Exception:
+            pass
+        _set_alpha(shp, alpha)
+        try:
+            line_srgb = shp.line.color._xFill.find(qn("a:srgbClr"))
+            if line_srgb is not None:
+                alpha_el = line_srgb.makeelement(qn("a:alpha"), {"val": str(int(border_alpha * 1000))})
+                line_srgb.append(alpha_el)
         except Exception:
             pass
         return shp
@@ -511,6 +634,59 @@ def _build_from_slides(slides: list[dict], project_name: str, theme_id: str = "e
         except Exception as exc:
             logger.debug("[PptxBuilder] diagram image skipped (%s): %s", path, exc)
 
+    def _picture_cover(slide, path, l, t, w, h):
+        """Like _picture() but fills the box completely (cropping overflow)
+        instead of letterboxing with empty bars — for hero-image regions
+        where empty space reads as unpolished. Uses python-pptx's crop_*
+        properties, which trim the *displayed* portion of the image without
+        touching the source file. Returns the Picture shape, or None if the
+        image couldn't be placed (never raises — a bad/missing hero image
+        just means that slide keeps its gradient-only look)."""
+        try:
+            from PIL import Image as _PILImage
+            with _PILImage.open(path) as im:
+                iw, ih = im.size
+            box_ratio = w / h
+            img_ratio = iw / ih
+            pic = slide.shapes.add_picture(str(path), Emu(_emu(l)), Emu(_emu(t)),
+                                            width=Emu(_emu(w)), height=Emu(_emu(h)))
+            if img_ratio > box_ratio:
+                visible_frac = box_ratio / img_ratio
+                crop = (1 - visible_frac) / 2
+                pic.crop_left = crop
+                pic.crop_right = crop
+            else:
+                visible_frac = img_ratio / box_ratio
+                crop = (1 - visible_frac) / 2
+                pic.crop_top = crop
+                pic.crop_bottom = crop
+            return pic
+        except Exception as exc:
+            logger.debug("[PptxBuilder] hero image skipped (%s): %s", path, exc)
+            return None
+
+    def _hero_wash(slide, s, *, width_frac=0.3, alpha=14):
+        """Low-alpha corner illustration behind an otherwise-light content
+        layout (e.g. KPI cards) — 'industry images combined with KPI cards':
+        the cards stay fully opaque/legible in front, the image just adds
+        atmosphere in the header/margin area behind them. No-ops if no
+        hero_image is present."""
+        hero_image = s.get("hero_image")
+        if not (hero_image and Path(hero_image).exists()):
+            return
+        w = TE.CANVAS["w"] * width_frac
+        pic = _picture_cover(slide, hero_image, TE.CANVAS["w"] - w, 0, w, TE.CANVAS["h"])
+        if pic is not None:
+            try:
+                pic.line.fill.background()
+            except Exception:
+                pass
+            # python-pptx doesn't expose picture alpha directly; a
+            # transparent scrim rectangle on top approximates the same
+            # "faded into the background" effect cheaply and reliably.
+            scrim = _rect(slide, TE.CANVAS["w"] - w, 0, w, TE.CANVAS["h"], fill=col("bg"))
+            _set_alpha(scrim, 100 - alpha)
+
     def _kicker(slide, text, l, t):
         """Small uppercase eyebrow label above a title (consulting hallmark)."""
         if not text:
@@ -552,44 +728,76 @@ def _build_from_slides(slides: list[dict], project_name: str, theme_id: str = "e
 
     # ── per-layout renderers ──────────────────────────────────────────────
     def render_title(slide, s):
-        _bg(slide, "bg3")  # charcoal hero
+        _bg_gradient(slide, "bg3", angle=35)  # charcoal hero, subtle diagonal wash
+
+        # Hero illustration: dedicated right-side region sized to ~40% of
+        # slide width (within the 35-45% spec), full height minus the
+        # footer band — placed after the gradient so it reads as blended
+        # into the hero rather than pasted on top. Text column narrows to
+        # make room; a glass card sits behind the title block so it stays
+        # legible over any image content. Decorative blobs are skipped
+        # entirely when a hero image is present — the image already
+        # provides visual interest in that corner, and layering blobs on
+        # top just adds clutter over the picture.
+        hero_image = s.get("hero_image")
+        has_hero = bool(hero_image and Path(hero_image).exists())
+        if not has_hero:
+            _decorative_blobs(slide, "accent", "on_dark", corner="br")
+        text_w = 7.2 if has_hero else 11.5
+        if has_hero:
+            img_w = TE.CANVAS["w"] * 0.40
+            _picture_cover(slide, hero_image, TE.CANVAS["w"] - img_w, 0, img_w, TE.CANVAS["h"] - 0.9)
+            _card_glass(slide, 0.35, 2.3, text_w + 0.5, 3.9)
+
         # Yellow signature block, lower-left
         _rect(slide, 0, TE.CANVAS["h"] - 0.9, TE.CANVAS["w"], 0.9, fill=col("bg3"))
-        _rect(slide, 0, 0, 0.16, TE.CANVAS["h"], fill=col("accent"))
+        _rect(slide, 0, 0, 0.16, TE.CANVAS["h"], fill=hero_accent())
         # brand mark
-        _tb(slide, "EY", 0.65, 0.55, 2.0, 0.9, size=40, bold=True, color=col("accent"))
+        _tb(slide, "EY", 0.65, 0.55, 2.0, 0.9, size=40, bold=True, color=hero_accent())
         _tb(slide, "Autonomous SDLC Studio", 1.7, 0.72, 6.0, 0.5, size=13,
             color=col("on_dark"), font=F_BODY)
         badge = s.get("badge", "")
         if badge:
             bw = 0.16 + 0.11 * len(badge)
-            _icon = _shape(slide, MSO_SHAPE.ROUNDED_RECTANGLE, TE.CANVAS["w"] - 0.55 - bw,
+            badge_x = TE.CANVAS["w"] - 0.55 - bw if not has_hero else TE.CANVAS["w"] * 0.6 - bw
+            _icon = _shape(slide, MSO_SHAPE.ROUNDED_RECTANGLE, badge_x,
                            0.6, bw, 0.44, fill=col("accent"))
-            _tb(slide, badge.upper(), TE.CANVAS["w"] - 0.55 - bw, 0.66, bw, 0.34,
+            _tb(slide, badge.upper(), badge_x, 0.66, bw, 0.34,
                 size=11, bold=True, color=col("on_accent"), align=PP_ALIGN.CENTER)
         # Title block
-        _rect(slide, 0.65, 2.55, 2.6, 0.07, fill=col("accent"))
-        _tb(slide, s.get("title", project_name), 0.62, 2.75, 11.5, 2.3, size=50, bold=True,
-            color=col("on_dark"), font=F_HEAD, spacing=1.02)
-        _tb(slide, s.get("subtitle", "AI-Autonomous Software Delivery"), 0.65, 5.15, 11.0, 0.9,
-            size=19, color=col("accent"), font=F_BODY, spacing=1.1)
+        _rect(slide, 0.65, 2.55, 2.6, 0.07, fill=hero_accent())
+        _tb(slide, s.get("title", project_name), 0.62, 2.75, text_w, 2.3, size=50 if not has_hero else 40,
+            bold=True, color=col("on_dark"), font=F_HEAD, spacing=1.02)
+        _tb(slide, s.get("subtitle", "AI-Autonomous Software Delivery"), 0.65, 5.15, text_w - 0.5, 0.9,
+            size=19 if not has_hero else 16, color=hero_accent(), font=F_BODY, spacing=1.1)
         date_str = datetime.now().strftime("%B %Y")
         _tb(slide, f"CONFIDENTIAL   ·   {date_str}", 0.65, 6.55, 8.0, 0.4,
             size=11, color=RGBColor(*_rgb(theme["muted"])), font=F_BODY)
         _notes(slide, s.get("speaker_notes", ""))
 
     def render_section(slide, s):
-        _bg(slide, "bg3")
-        _rect(slide, 0, 0, 0.16, TE.CANVAS["h"], fill=col("accent"))
+        _bg_gradient(slide, "bg3", angle=135)
+
+        hero_image = s.get("hero_image")
+        has_hero = bool(hero_image and Path(hero_image).exists())
+        if not has_hero:
+            _decorative_blobs(slide, "accent", "on_dark", corner="tr")
+        text_w = 7.2 if has_hero else 11.5
+        if has_hero:
+            img_w = TE.CANVAS["w"] * 0.40
+            _picture_cover(slide, hero_image, TE.CANVAS["w"] - img_w, 0, img_w, TE.CANVAS["h"])
+            _card_glass(slide, 0.4, 1.9, text_w + 0.4, 4.4)
+
+        _rect(slide, 0, 0, 0.16, TE.CANVAS["h"], fill=hero_accent())
         num = s.get("number", "")
         if num:
             _tb(slide, str(num), 0.65, 2.2, 3.0, 1.6, size=110, bold=True,
-                color=RGBColor(*_rgb(theme["accent"])), font=F_HEAD)
-        _rect(slide, 0.72, 4.15, 2.4, 0.06, fill=col("accent"))
-        _tb(slide, s.get("title", ""), 0.68, 4.35, 11.5, 1.4, size=42, bold=True,
-            color=col("on_dark"), font=F_HEAD)
+                color=hero_accent(), font=F_HEAD)
+        _rect(slide, 0.72, 4.15, 2.4, 0.06, fill=hero_accent())
+        _tb(slide, s.get("title", ""), 0.68, 4.35, text_w, 1.4, size=42 if not has_hero else 34,
+            bold=True, color=col("on_dark"), font=F_HEAD)
         if s.get("subtitle"):
-            _tb(slide, s["subtitle"], 0.7, 5.7, 11.0, 0.7, size=16, color=col("accent"),
+            _tb(slide, s["subtitle"], 0.7, 5.7, text_w - 0.5, 0.7, size=16, color=hero_accent(),
                 font=F_BODY)
         _notes(slide, s.get("speaker_notes", ""))
 
@@ -652,6 +860,7 @@ def _build_from_slides(slides: list[dict], project_name: str, theme_id: str = "e
         _notes(slide, s.get("speaker_notes", ""))
 
     def render_kpi_cards(slide, s):
+        _hero_wash(slide, s)
         _header(slide, s.get("title", ""), s.get("subtitle", ""), s.get("kicker", "By the Numbers"))
         stats = s.get("stats", [])[:4]
         mx = L["margin_x"]
@@ -680,6 +889,7 @@ def _build_from_slides(slides: list[dict], project_name: str, theme_id: str = "e
         _notes(slide, s.get("speaker_notes", ""))
 
     def render_stats_grid(slide, s):  # 2×2 variant
+        _hero_wash(slide, s)
         _header(slide, s.get("title", ""), s.get("subtitle", ""), s.get("kicker", "By the Numbers"))
         stats = s.get("stats", [])[:4]
         mx = L["margin_x"]; gap = L["gutter"]
@@ -973,28 +1183,55 @@ def _build_from_slides(slides: list[dict], project_name: str, theme_id: str = "e
         _notes(slide, s.get("speaker_notes", ""))
 
     def render_quote(slide, s):
-        _bg(slide, "bg3")
-        _rect(slide, 0, 0, 0.16, TE.CANVAS["h"], fill=col("accent"))
+        _bg_gradient(slide, "bg3", angle=90)
+
+        hero_image = s.get("hero_image")
+        has_hero = bool(hero_image and Path(hero_image).exists())
+        if not has_hero:
+            _decorative_blobs(slide, "accent", "on_dark", corner="tr")
+        quote_w = 6.6 if has_hero else 10.4
+        if has_hero:
+            img_w = TE.CANVAS["w"] * 0.38
+            _picture_cover(slide, hero_image, TE.CANVAS["w"] - img_w, 0, img_w, TE.CANVAS["h"])
+            _card_glass(slide, 0.4, 0.8, quote_w + 1.3, 4.7)
+
+        _rect(slide, 0, 0, 0.16, TE.CANVAS["h"], fill=hero_accent())
         _tb(slide, "“", 0.7, 1.0, 3.0, 2.0, size=140, bold=True,
-            color=RGBColor(*_rgb(theme["accent"])), font=F_HEAD)
-        _tb(slide, s.get("quote", s.get("title", "")), 1.9, 2.4, 10.4, 2.6, size=30, bold=True,
-            color=col("on_dark"), font=F_HEAD, spacing=1.12)
+            color=hero_accent(), font=F_HEAD)
+        _tb(slide, s.get("quote", s.get("title", "")), 1.9, 2.4, quote_w, 2.6, size=30 if not has_hero else 24,
+            bold=True, color=col("on_dark"), font=F_HEAD, spacing=1.12)
         if s.get("attribution"):
-            _rect(slide, 1.95, 5.3, 0.5, 0.05, fill=col("accent"))
-            _tb(slide, s["attribution"], 2.6, 5.15, 9.0, 0.5, size=15, color=col("accent"),
+            _rect(slide, 1.95, 5.3, 0.5, 0.05, fill=hero_accent())
+            _tb(slide, s["attribution"], 2.6, 5.15, quote_w - 1.0, 0.5, size=15, color=hero_accent(),
                 font=F_BODY)
         _footer(slide, s["_n"], s["_total"], s.get("title", ""))
         _notes(slide, s.get("speaker_notes", ""))
 
     def render_closing(slide, s):
-        _bg(slide, "bg3")
-        _rect(slide, 0, 0, 0.16, TE.CANVAS["h"], fill=col("accent"))
-        _tb(slide, "EY", 0.65, 0.5, 2.0, 0.8, size=32, bold=True, color=col("accent"))
-        _rect(slide, 0.68, 1.7, 2.4, 0.06, fill=col("accent"))
-        _tb(slide, s.get("title", "Thank You"), 0.65, 1.9, 11.5, 1.2, size=44, bold=True,
-            color=col("on_dark"), font=F_HEAD)
+        _bg_gradient(slide, "bg3", angle=45)
+
+        # Hero image is confined to the top-right area only (above the icon-
+        # items row, which needs the full slide width) — a smaller region
+        # than title/section/quote's full-height treatment, but still gives
+        # the closing slide visual presence instead of ending the deck on
+        # a flat gradient.
+        hero_image = s.get("hero_image")
+        has_hero = bool(hero_image and Path(hero_image).exists())
+        if not has_hero:
+            _decorative_blobs(slide, "accent", "on_dark", corner="br")
+        text_w = 7.2 if has_hero else 11.5
+        if has_hero:
+            img_w = TE.CANVAS["w"] * 0.35
+            _picture_cover(slide, hero_image, TE.CANVAS["w"] - img_w, 0, img_w, 3.6)
+            _card_glass(slide, 0.4, 0.35, text_w + 0.4, 3.0)
+
+        _rect(slide, 0, 0, 0.16, TE.CANVAS["h"], fill=hero_accent())
+        _tb(slide, "EY", 0.65, 0.5, 2.0, 0.8, size=32, bold=True, color=hero_accent())
+        _rect(slide, 0.68, 1.7, 2.4, 0.06, fill=hero_accent())
+        _tb(slide, s.get("title", "Thank You"), 0.65, 1.9, text_w, 1.2, size=44 if not has_hero else 36,
+            bold=True, color=col("on_dark"), font=F_HEAD)
         if s.get("subtitle"):
-            _tb(slide, s["subtitle"], 0.68, 3.05, 11.0, 0.5, size=15, color=col("accent"),
+            _tb(slide, s["subtitle"], 0.68, 3.05, text_w - 0.5, 0.5, size=15, color=hero_accent(),
                 font=F_BODY)
         items = s.get("items", [])[:4]
         mx = 0.65; gap = 0.28
@@ -1010,6 +1247,34 @@ def _build_from_slides(slides: list[dict], project_name: str, theme_id: str = "e
                     _tb(slide, it["body"], x, y + 1.2, cw, 1.1, size=11, color=col("muted"),
                         font=F_BODY, spacing=1.1)
         _footer(slide, s["_n"], s["_total"], s.get("title", ""))
+        _notes(slide, s.get("speaker_notes", ""))
+
+    def render_hero(slide, s):
+        """Full-bleed, image-led 'hero moment' slide — a single powerful
+        statement/vision beat (Gamma-style), distinct from title/section/
+        quote/closing where a hero image only ever decorates one side.
+        Falls back to the standard hero gradient + decorative blobs when no
+        hero_image is attached, so this layout never renders empty."""
+        hero_image = s.get("hero_image")
+        has_hero = bool(hero_image and Path(hero_image).exists())
+        if has_hero:
+            _picture_cover(slide, hero_image, 0, 0, TE.CANVAS["w"], TE.CANVAS["h"])
+        else:
+            _bg_gradient(slide, "bg3", angle=45)
+            _decorative_blobs(slide, "accent", "on_dark", corner="tr")
+
+        # Bottom-anchored glass card carries the statement over the image
+        # (or gradient) so text stays legible either way.
+        card_h = 2.9
+        card_y = TE.CANVAS["h"] - card_h - 0.4
+        _card_glass(slide, 0.6, card_y, TE.CANVAS["w"] - 1.2, card_h, tint="on_dark", alpha=55)
+        _rect(slide, 0.9, card_y + 0.32, 0.5, 0.06, fill=hero_accent())
+        _tb(slide, s.get("title", ""), 0.9, card_y + 0.5, TE.CANVAS["w"] - 2.2, 1.1,
+            size=34, bold=True, color=col("on_dark"), font=F_HEAD, spacing=1.05)
+        body = s.get("subtitle") or s.get("content") or ""
+        if body:
+            _tb(slide, body, 0.9, card_y + 1.6, TE.CANVAS["w"] - 2.2, 1.0,
+                size=15, color=hero_accent(), font=F_BODY, spacing=1.15)
         _notes(slide, s.get("speaker_notes", ""))
 
     def render_content(slide, s):
@@ -1032,7 +1297,7 @@ def _build_from_slides(slides: list[dict], project_name: str, theme_id: str = "e
         "tech_grid": render_tech_grid, "process": render_process,
         "architecture": render_architecture, "roadmap": render_roadmap,
         "timeline": render_timeline, "quote": render_quote, "closing": render_closing,
-        "content": render_content,
+        "hero": render_hero, "content": render_content,
     }
 
     total = len(slides)

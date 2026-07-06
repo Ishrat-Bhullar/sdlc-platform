@@ -34,14 +34,6 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Optional[Callable[[str, int, str], None]]  # (stage, percent, message)
 
 
-def _emit(progress_cb: ProgressCallback, stage: str, percent: int, message: str = "") -> None:
-    if progress_cb:
-        try:
-            progress_cb(stage, percent, message)
-        except Exception:
-            logger.debug("[VideoGenerationService] progress callback raised", exc_info=True)
-
-
 # ---------------------------------------------------------------------------
 # Config dataclasses (decoupled from the API-layer Pydantic schemas so this
 # module has no FastAPI/Pydantic dependency)
@@ -232,69 +224,6 @@ class SlideRenderer:
 # so there is exactly one video-encoding strategy in the codebase).
 # ---------------------------------------------------------------------------
 
-class VideoComposer:
-    """Combines per-slide images and matching per-slide narration audio into
-    a single narrated MP4 by shelling out to ffmpeg directly per slide, then
-    concatenating — the same approach as the live /video/render pipeline.
-    Requires a working ffmpeg + ffprobe binary on PATH."""
-
-    def __init__(self, fps: int = 24, resolution: tuple[int, int] = (1920, 1080)):
-        self.fps = fps
-        self.resolution = resolution
-
-    def compose(self, slide_images: list[Path], slide_audio: list[Path], out_path: Path) -> Path:
-        import subprocess
-        import shutil as _shutil
-        import uuid as _uuid
-
-        if not slide_images:
-            raise ValueError("[VideoComposer] No slide images provided")
-        if len(slide_images) != len(slide_audio):
-            raise ValueError(
-                f"[VideoComposer] slide_images ({len(slide_images)}) and "
-                f"slide_audio ({len(slide_audio)}) count mismatch"
-            )
-
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        rw, rh = self.resolution
-        tmp_dir = out_path.parent / f"clips_{_uuid.uuid4().hex[:8]}"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            clip_paths: list[Path] = []
-            for i, (img_path, audio_path) in enumerate(zip(slide_images, slide_audio)):
-                clip = tmp_dir / f"slide_{i:03d}.mp4"
-                subprocess.run(
-                    [
-                        "ffmpeg", "-y",
-                        "-loop", "1", "-i", str(img_path),
-                        "-i", str(audio_path),
-                        "-vf", f"scale={rw}:{rh},fps={self.fps}",
-                        "-c:v", "libx264", "-tune", "stillimage",
-                        "-c:a", "aac", "-b:a", "192k",
-                        "-pix_fmt", "yuv420p", "-shortest",
-                        "-movflags", "+faststart",
-                        str(clip),
-                    ],
-                    check=True, capture_output=True, timeout=120,
-                )
-                clip_paths.append(clip)
-
-            list_file = tmp_dir / "concat_list.txt"
-            list_file.write_text("\n".join(f"file '{c}'" for c in clip_paths))
-            subprocess.run(
-                [
-                    "ffmpeg", "-y",
-                    "-f", "concat", "-safe", "0", "-i", str(list_file),
-                    "-c:v", "libx264", "-c:a", "aac",
-                    "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-                    str(out_path),
-                ],
-                check=True, capture_output=True, timeout=300,
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.decode(errors="ignore") if exc.stderr else str(exc)
-            raise RuntimeError(f"[VideoComposer] ffmpeg encoding failed: {stderr[-800:]}") from exc
-        finally:
-            _shutil.rmtree(tmp_dir, ignore_errors=True)
-
-        return out_path
+# VideoComposer moved to services/video_composer.py (adds subtitle-burning
+# support); re-exported here so existing imports of this module keep working.
+from .video_composer import VideoComposer  # noqa: F401,E402

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pydantic import BaseModel
-from .llm_client import OllamaClient, call_and_validate
+from .llm_service import LLMService
 
 
 # ---------------------------------
@@ -113,8 +113,8 @@ Generate the structured compliance architecture output now.
 # ---------------------------------
 
 class ComplianceArchitectAgent:
-    def __init__(self, client: OllamaClient | None = None):
-        self.client = client or OllamaClient()
+    def __init__(self, llm: LLMService | None = None, *, db=None, project_id: int | None = None):
+        self.llm = llm or LLMService(db=db, project_id=project_id, role="architect")
 
     def run(
         self,
@@ -129,8 +129,7 @@ class ComplianceArchitectAgent:
         if not project_description:
             raise ValueError("Project description cannot be empty")
 
-        result = call_and_validate(
-            client=self.client,
+        result = self.llm.generate_json(
             system=COMPLIANCE_AGENT_SYSTEM_PROMPT,
             prompt=build_compliance_prompt(
                 project_description, requirements, architecture, database, uiux, security
@@ -142,32 +141,3 @@ class ComplianceArchitectAgent:
             raise ValueError("No compliance assessment generated")
 
         return result
-
-
-# ---------------------------------
-# Test Run Block
-# ---------------------------------
-
-if __name__ == "__main__":
-    agent = ComplianceArchitectAgent()
-
-    mock_description = "Healthcare patient management system"
-    mock_requirements = {
-        "functional": [
-            {"id": "REQ-001", "description": "Store patient medical records"}
-        ]
-    }
-    mock_security = {
-        "authentication": {"strategy": "OAuth2", "mfa": True}
-    }
-
-    print("Running Compliance Architect Agent Test...")
-
-    try:
-        output = agent.run(mock_description, mock_requirements, security=mock_security)
-        print("\n--- TEST SUCCESSFUL ---")
-        print(output.model_dump_json(indent=2))
-
-    except Exception as e:
-        print("\n--- TEST FAILED ---")
-        print(f"Error: {e}")
