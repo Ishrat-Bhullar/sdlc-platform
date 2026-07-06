@@ -2345,6 +2345,12 @@ def run_pipeline(
 
 
 def _run_pipeline_inner(job, db_session_factory, save_artifact_fn):
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError(
+            "ffmpeg is not installed or not on PATH — video rendering requires ffmpeg. "
+            "Install it (e.g. `brew install ffmpeg` on macOS, `apt install ffmpeg` on Linux) and retry."
+        )
+
     tmp_dir = VIDEO_OUTPUT_DIR / f"job_{job.job_id}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     slides = job.slides

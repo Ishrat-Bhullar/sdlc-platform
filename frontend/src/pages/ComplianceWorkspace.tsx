@@ -212,7 +212,13 @@ export function ComplianceWorkspace() {
             {compliance.governanceControls?.map((control, idx) => (
               <div key={idx} className="flex items-start gap-3 rounded-lg bg-dark-bg p-4 border border-dark-border">
                 <Shield className="h-4 w-4 text-status-success mt-0.5" />
-                <p className="text-sm text-text-primary">{control}</p>
+                <div>
+                  <p className="text-sm text-text-primary">{control.control}</p>
+                  <p className="text-xs text-text-muted mt-1">
+                    <span className="text-ey-yellow">{control.framework}</span> — {control.requirement}
+                  </p>
+                  <p className="text-xs text-text-muted mt-1">{control.implementation}</p>
+                </div>
               </div>
             ))}
           </div>
@@ -230,7 +236,10 @@ export function ComplianceWorkspace() {
             {compliance.auditRequirements?.map((req, idx) => (
               <div key={idx} className="flex items-start gap-3 rounded-lg bg-dark-bg p-4 border border-dark-border">
                 <CheckCircle2 className="h-4 w-4 text-status-info mt-0.5" />
-                <p className="text-sm text-text-primary">{req}</p>
+                <div>
+                  <p className="text-sm text-text-primary">{req.requirement}</p>
+                  <p className="text-xs text-text-muted mt-1">Frequency: {req.frequency} · Evidence: {req.evidence} · Owner: {req.responsible}</p>
+                </div>
               </div>
             ))}
           </div>
@@ -248,7 +257,11 @@ export function ComplianceWorkspace() {
             {compliance.dataRetentionPolicies?.map((policy, idx) => (
               <div key={idx} className="flex items-start gap-3 rounded-lg bg-dark-bg p-4 border border-dark-border">
                 <Lock className="h-4 w-4 text-status-success mt-0.5" />
-                <p className="text-sm text-text-primary">{policy}</p>
+                <div>
+                  <p className="text-sm text-text-primary">{policy.dataType} — retain {policy.retentionPeriod}</p>
+                  <p className="text-xs text-text-muted mt-1">Deletion: {policy.deletionMethod}</p>
+                  <p className="text-xs text-text-muted mt-1">{policy.justification}</p>
+                </div>
               </div>
             ))}
           </div>
@@ -258,7 +271,11 @@ export function ComplianceWorkspace() {
               {compliance.riskAssessment?.map((risk, idx) => (
                 <div key={idx} className="flex items-start gap-2 rounded-lg bg-status-warning/5 p-3 border border-status-warning/20">
                   <AlertTriangle className="h-4 w-4 text-status-warning mt-0.5" />
-                  <p className="text-sm text-text-primary">{risk}</p>
+                  <div>
+                    <p className="text-sm text-text-primary">{risk.risk}</p>
+                    <p className="text-xs text-text-muted mt-1">Likelihood: {risk.likelihood} · Impact: {risk.impact} · Owner: {risk.owner}</p>
+                    <p className="text-xs text-text-muted mt-1">Mitigation: {risk.mitigation}</p>
+                  </div>
                 </div>
               ))}
             </div>

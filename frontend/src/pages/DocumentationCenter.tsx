@@ -649,8 +649,10 @@ function DocumentViewer({ artifact, onClose, onUpdate }: DocumentViewerProps) {
             <div>
               <h3 className="text-lg font-semibold text-text-primary mb-2">Technology Stack</h3>
               <div className="flex flex-wrap gap-2">
-                {(content as any).tech_stack.map((tech: string, i: number) => (
-                  <span key={i} className="px-3 py-1 rounded-full bg-ey-yellow/10 text-ey-yellow text-xs">{tech}</span>
+                {Object.entries((content as any).tech_stack as Record<string, string>).map(([category, tech]) => (
+                  <span key={category} className="px-3 py-1 rounded-full bg-ey-yellow/10 text-ey-yellow text-xs">
+                    <span className="text-text-muted">{category}:</span> {tech}
+                  </span>
                 ))}
               </div>
             </div>

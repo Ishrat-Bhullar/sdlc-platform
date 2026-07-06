@@ -176,9 +176,16 @@ export function UIUXWorkspace() {
               <div key={idx} className="rounded-lg bg-dark-bg p-4 border border-dark-border">
                 <div className="flex items-center gap-2 mb-2">
                   <Smartphone className="h-4 w-4 text-ey-yellow" />
-                  <h4 className="text-sm font-medium text-text-primary">{screen}</h4>
+                  <h4 className="text-sm font-medium text-text-primary">{screen.name}</h4>
                 </div>
-                <p className="text-xs text-text-muted">Screen {idx + 1} of {design.screens?.length}</p>
+                <p className="text-xs text-text-muted">{screen.purpose}</p>
+                {screen.components?.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {screen.components.map((c, ci) => (
+                      <span key={ci} className="text-[10px] px-2 py-0.5 rounded-full bg-ey-yellow/10 text-ey-yellow">{c}</span>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -202,7 +209,14 @@ export function UIUXWorkspace() {
                     </div>
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm text-text-primary">{flow}</p>
+                    <p className="text-sm text-text-primary">{flow.name}</p>
+                    {flow.steps?.length > 0 && (
+                      <ol className="mt-1 list-decimal list-inside text-xs text-text-muted space-y-0.5">
+                        {flow.steps.map((step, si) => (
+                          <li key={si}>{step}</li>
+                        ))}
+                      </ol>
+                    )}
                   </div>
                 </div>
               </div>
@@ -221,7 +235,9 @@ export function UIUXWorkspace() {
           <div className="space-y-3">
             {design.wireframes?.map((wireframe, idx) => (
               <div key={idx} className="rounded-lg bg-dark-bg p-4 border border-dark-border">
-                <p className="text-sm text-text-primary">{wireframe}</p>
+                <p className="text-sm text-text-primary font-medium">{wireframe.screen}</p>
+                <p className="text-xs text-text-muted mt-1">{wireframe.layout}</p>
+                <p className="text-xs text-text-muted mt-1">{wireframe.description}</p>
               </div>
             ))}
           </div>
@@ -240,7 +256,10 @@ export function UIUXWorkspace() {
               <div key={idx} className="rounded-lg bg-dark-bg p-3 border border-dark-border">
                 <div className="flex items-start gap-2">
                   <CheckCircle2 className="h-4 w-4 text-status-success mt-0.5" />
-                  <p className="text-xs text-text-primary">{rec}</p>
+                  <div>
+                    <p className="text-xs text-text-primary font-medium">{rec.name} <span className="text-text-muted font-normal">({rec.type}{rec.library ? ` · ${rec.library}` : ''})</span></p>
+                    <p className="text-xs text-text-muted mt-1">{rec.rationale}</p>
+                  </div>
                 </div>
               </div>
             ))}

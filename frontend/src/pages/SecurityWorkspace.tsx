@@ -208,7 +208,11 @@ export function SecurityWorkspace() {
               <div key={idx} className="rounded-lg bg-dark-bg p-4 border border-dark-border">
                 <div className="flex items-start gap-3">
                   <AlertTriangle className="h-4 w-4 text-status-warning mt-0.5" />
-                  <p className="text-sm text-text-primary">{threat}</p>
+                  <div>
+                    <p className="text-sm text-text-primary">{threat.threat}</p>
+                    <p className="text-xs text-text-muted mt-1">Impact: {threat.impact} · Likelihood: {threat.likelihood}</p>
+                    <p className="text-xs text-text-muted mt-1">Mitigation: {threat.mitigation}</p>
+                  </div>
                 </div>
               </div>
             ))}
@@ -266,7 +270,10 @@ export function SecurityWorkspace() {
                 {security.securityControls?.map((control, idx) => (
                   <div key={idx} className="flex items-start gap-2 rounded-lg bg-dark-bg p-3">
                     <CheckCircle2 className="h-4 w-4 text-status-success mt-0.5" />
-                    <p className="text-sm text-text-primary">{control}</p>
+                    <div>
+                      <p className="text-sm text-text-primary">{control.control}</p>
+                      <p className="text-xs text-text-muted mt-1">{control.category} — {control.implementation}</p>
+                    </div>
                   </div>
                 ))}
               </div>

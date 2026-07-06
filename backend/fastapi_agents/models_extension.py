@@ -245,9 +245,14 @@ class GenerateApiDesignRequest(BaseModel):
 class EndpointDef(BaseModel):
     method: str
     path: str
-    summary: str
-    request_body: dict[str, Any] | None = None
-    response_shape: dict[str, Any] | None = None
+    # The API design agent (ai_service.generate_api_design / ApiDesignResult)
+    # produces `description` and string examples for request/response bodies,
+    # not a `summary` field or nested dict schemas — this model previously
+    # didn't match that shape, which raised a ResponseValidationError (500)
+    # on every real generation once an LLM key was configured.
+    description: str = ""
+    request_body: str | None = None
+    response: str = ""
     auth_required: bool = True
 
 

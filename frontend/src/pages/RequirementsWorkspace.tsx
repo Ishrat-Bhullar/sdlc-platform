@@ -165,25 +165,36 @@ export function RequirementsWorkspace() {
   }, [requirements]);
 
   const riskItems: Risk[] = useMemo(() => {
-    return risks.map((r: any, idx: number) => ({
-      id: String(r.id || `RISK-${idx + 1}`),
-      description: String(r.description || ''),
-      probability: String(r.probability || 'medium'),
-      impact: String(r.impact || 'medium'),
-      mitigation: String(r.mitigation || ''),
-      status: String(r.status || 'open'),
-    }));
+    // The requirement agent's risks/dependencies are plain strings
+    // (RequirementAgentOutput.risks: list[str]), not objects — reading
+    // r.description off a string is always undefined, which silently
+    // dropped every risk's actual text. Use the string itself when that's
+    // what we got, same as the acceptanceCriteria mapping already does.
+    return risks.map((r: any, idx: number) => {
+      const isString = typeof r === 'string';
+      return {
+        id: String((!isString && r.id) || `RISK-${idx + 1}`),
+        description: isString ? r : String(r.description || ''),
+        probability: String((!isString && r.probability) || 'medium'),
+        impact: String((!isString && r.impact) || 'medium'),
+        mitigation: String((!isString && r.mitigation) || ''),
+        status: String((!isString && r.status) || 'open'),
+      };
+    });
   }, [risks]);
 
   const dependencyItems: Dependency[] = useMemo(() => {
-    return dependencies.map((d: any, idx: number) => ({
-      id: String(d.id || `DEP-${idx + 1}`),
-      name: String(d.name || ''),
-      type: String(d.type || 'technical'),
-      description: String(d.description || ''),
-      status: String(d.status || 'pending'),
-      criticality: String(d.criticality || 'medium'),
-    }));
+    return dependencies.map((d: any, idx: number) => {
+      const isString = typeof d === 'string';
+      return {
+        id: String((!isString && d.id) || `DEP-${idx + 1}`),
+        name: isString ? d : String(d.name || ''),
+        type: String((!isString && d.type) || 'technical'),
+        description: isString ? '' : String(d.description || ''),
+        status: String((!isString && d.status) || 'pending'),
+        criticality: String((!isString && d.criticality) || 'medium'),
+      };
+    });
   }, [dependencies]);
 
   const acceptanceCriteria: AcceptanceCriterion[] = useMemo(() => {

@@ -267,7 +267,10 @@ async def generate_requirements(
 ) -> dict:
     _get_project_or_404(db, payload.project_id)
 
-    result = ai_service.generate_requirements(db, payload.project_id, payload.prompt, payload.document_ids)
+    try:
+        result = ai_service.generate_requirements(db, payload.project_id, payload.prompt, payload.document_ids)
+    except ai_service.AIGenerationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
     # Auto-enrich each requirement into an implementation-ready spec.
     try:
@@ -319,7 +322,10 @@ async def generate_user_stories(
     )
     context = req_artifact.content if req_artifact else ""
 
-    result = ai_service.generate_user_stories(db, payload.project_id, context)
+    try:
+        result = ai_service.generate_user_stories(db, payload.project_id, context)
+    except ai_service.AIGenerationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
     artifact = _save_artifact(db, payload.project_id, ArtifactType.USER_STORIES.value, json.dumps(result))
     total = sum(len(e.get("stories", [])) for e in result.get("epics", []))
@@ -354,7 +360,10 @@ async def generate_architecture(
     project = _get_project_or_404(db, payload.project_id)
     context = project.description or project.name
 
-    result = ai_service.generate_architecture(db, payload.project_id, context)
+    try:
+        result = ai_service.generate_architecture(db, payload.project_id, context)
+    except ai_service.AIGenerationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
     # Augment with the complete, deterministic diagram set derived from real
     # project data (components, microservices, tech_stack, DB schema).
@@ -492,7 +501,10 @@ async def generate_database_schema(
     project = _get_project_or_404(db, payload.project_id)
     context = project.description or project.name
 
-    result = ai_service.generate_database_schema(db, payload.project_id, context)
+    try:
+        result = ai_service.generate_database_schema(db, payload.project_id, context)
+    except ai_service.AIGenerationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
     artifact = _save_artifact(db, payload.project_id, ArtifactType.SQL_SCHEMA.value, json.dumps(result))
     db.add(TimelineEvent(project_id=payload.project_id, stage="Database Schema Generated", status=RunStatus.COMPLETED.value))
@@ -522,7 +534,10 @@ async def generate_api_design(
     project = _get_project_or_404(db, payload.project_id)
     context = project.description or project.name
 
-    result = ai_service.generate_api_design(db, payload.project_id, context)
+    try:
+        result = ai_service.generate_api_design(db, payload.project_id, context)
+    except ai_service.AIGenerationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
     artifact = _save_artifact(db, payload.project_id, ArtifactType.API_DESIGN.value, json.dumps(result))
     db.add(TimelineEvent(project_id=payload.project_id, stage="API Design Generated", status=RunStatus.COMPLETED.value))
@@ -915,7 +930,7 @@ def export_artifact(
 
 
 @router.get("/documents/export-all", tags=["documents"])
-@router.post("/documents/export-all", response_model=ExportAllResponse, tags=["documents"])
+@router.post("/documents/export-all", tags=["documents"])
 def export_all_documents(
     project_id: int | None = None,
     db: Session = Depends(get_db),
@@ -1057,40 +1072,24 @@ async def decide_approval(
     await manager.approval_completed(project_id, approval_id, payload.decision, current_user.id)
 
     # If approved, resume the pipeline from the appropriate checkpoint.
-    if payload.decision == ApprovalStatus.APPROVED.value:
-        # Determine which checkpoint this approval belongs to by inspecting its artifact_type.
-        # In agent_runner.py both review checkpoints are modeled as approvals with
-        # artifact_type=ArtifactType.API_RESPONSE_MOCK.
-        # We disambiguate by looking at the latest timeline event stage text created during
-        # approval decision.
-        latest_stage = (
-            db.query(TimelineEvent.stage)
-            .filter(TimelineEvent.project_id == project_id)
-            .order_by(TimelineEvent.id.desc())
-            .limit(1)
-            .first()
-        )
-        stage_str = latest_stage[0] if latest_stage else ""
-
-        # Review 1 approved → resume from Solution Architecture
-        if "Checkpoint 1" in stage_str or "Human Review Checkpoint 1" in stage_str:
-            runs = (
-                db.query(AgentRun)
-                .filter(AgentRun.project_id == project_id, AgentRun.agent_name == _AgentName.SOLUTION_ARCHITECT_AGENT.value)
-                .all()
-            )
-            if runs:
-                _asyncio.create_task(_agent_runner.run_agent(project_id, runs[-1].id))
-
-        # Review 2 approved → resume from Presentation & Video Generation
-        if "Checkpoint 2" in stage_str or "Human Review Checkpoint 2" in stage_str:
-            runs = (
-                db.query(AgentRun)
-                .filter(AgentRun.project_id == project_id, AgentRun.agent_name == _AgentName.PRESENTATION_VIDEO_AGENT.value)
-                .all()
-            )
-            if runs:
-                _asyncio.create_task(_agent_runner.run_agent(project_id, runs[-1].id))
+    # Which checkpoint this is is already known with certainty from the
+    # approval's own artifact_type — no need to guess from timeline-event
+    # text (the previous approach searched the latest TimelineEvent for
+    # "Checkpoint 1"/"Checkpoint 2", but that row is either the BA/Architect
+    # stage's own completion event — whichever agent last ran before the
+    # pipeline paused — or, after the fix below, this function's own
+    # "Approval Approved: review_1_checkpoint" event added just above,
+    # neither of which contains that substring, so the match always failed
+    # and the pipeline never actually resumed).
+    # run_pipeline() (not run_agent()) is required here: it walks the
+    # remaining stages in order (Solution Architecture through
+    # Documentation), whereas run_agent() executes only a single stage and
+    # leaves everything after it stuck at "pending" forever.
+    if payload.decision == ApprovalStatus.APPROVED.value and approval.artifact_type in (
+        ArtifactType.REVIEW_1_CHECKPOINT.value,
+        ArtifactType.REVIEW_2_CHECKPOINT.value,
+    ):
+        _asyncio.create_task(_agent_runner.run_pipeline(project_id))
 
 
     return {
@@ -1131,7 +1130,10 @@ def _run_review_endpoint(review_type: str):
             art = _latest_artifact(db, payload.project_id, preferred) if preferred else None
             content = art.content if art else (payload.context or f"Review {review_type} for project {payload.project_id}")
 
-        result = ai_service.run_review(db, payload.project_id, review_type, content)
+        try:
+            result = ai_service.run_review(db, payload.project_id, review_type, content)
+        except ai_service.AIGenerationError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
         # Persist review result
         review_row = ReviewResult(
@@ -1435,7 +1437,7 @@ async def trigger_agent_run(
         "run_id": run.id,
         "agent_name": run.agent_name,
         "status": "starting",
-        "message": f"{run.agent_name} queued — watch /ws/{project_id} for progress events",
+        "message": f"{run.agent_name} queued — watch /ws?projectId={project_id} for progress events",
     }
 
 
@@ -1460,7 +1462,7 @@ async def trigger_pipeline(
     return {
         "project_id": project_id,
         "agents_queued": len(runs),
-        "message": f"Pipeline started for project {project_id} — watch /ws/{project_id} for live progress",
+        "message": f"Pipeline started for project {project_id} — watch /ws?projectId={project_id} for live progress",
     }
 
 
@@ -2272,21 +2274,28 @@ class PipelineStatusOut(_BaseModel):
  
 # ── Display labels for each pipeline stage ────────────────────────────────────
  
+#  Keys are the actual AgentName enum values used as agent_key throughout
+#  PIPELINE/_AGENT_CONFIG (e.g. "Human Review 1", "UI/UX Design Agent"), not
+#  the snake_case agent identifiers — the previous snake_case keys never
+#  matched, so this lookup silently always missed and fell through to
+#  agent_key.title(), which mangles "UI/UX Design Agent" into "Ui/Ux Design
+#  Agent".
 _STAGE_LABELS: dict[str, str] = {
-    "memory_agent":              "Memory",
-    "requirement_agent":         "Requirements",
-    "business_analyst_agent":    "Business Analyst",
-    "review_1":                  "Human Approval 1",
-    "solution_architect_agent":  "Architecture",
-    "database_agent":            "Database",
-    "uiux_agent":                "UI/UX",
-    "security_agent":            "Security",
-    "compliance_agent":          "Compliance",
-    "review_2":                  "Human Approval 2",
-    "frontend_agent":            "Frontend",
-    "backend_agent":             "Backend",
-    "testing_agent":             "Testing",
-    "documentation_agent":       "Documentation",
+    "Memory Agent":               "Memory",
+    "Requirement Agent":          "Requirements",
+    "Business Analyst Agent":     "Business Analyst",
+    "Human Review 1":             "Human Approval 1",
+    "Solution Architect Agent":   "Architecture",
+    "Database Design Agent":      "Database",
+    "UI/UX Design Agent":         "UI/UX",
+    "Security Architect Agent":   "Security",
+    "Compliance Architect Agent": "Compliance",
+    "Human Review 2":             "Human Approval 2",
+    "Presentation video agent":   "Presentation & Video",
+    "Frontend Agent":             "Frontend",
+    "Backend Agent":              "Backend",
+    "Testing Agent":              "Testing",
+    "Documentation Agent":        "Documentation",
 }
  
  
@@ -2506,7 +2515,7 @@ def workflow_reject(
         db.query(AgentRun)
         .filter(
             AgentRun.project_id == payload.project_id,
-            AgentRun.agent_name == "review_1",
+            AgentRun.agent_name == _AgentName.REVIEW_1.value,
         )
         .first()
     )

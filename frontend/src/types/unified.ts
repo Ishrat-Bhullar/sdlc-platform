@@ -309,18 +309,57 @@ export interface ApiDesignContent {
 export interface ApiEndpoint {
   method: string;
   path: string;
-  summary: string;
-  request_body?: Record<string, unknown>;
-  response_shape?: Record<string, unknown>;
+  description: string;
+  request_body?: string | null;
+  response?: string;
   auth_required: boolean;
 }
 
-export interface UIUXDesignContent {
+export interface UIUXScreen {
+  name: string;
+  purpose: string;
+  type: string;
+  components: string[];
+}
+
+export interface UIUXUserFlow {
+  name: string;
+  steps: string[];
   screens: string[];
-  userFlows: string[];
-  wireframes: string[];
-  componentRecommendations: string[];
+}
+
+export interface UIUXWireframe {
+  screen: string;
+  layout: string;
+  description: string;
+}
+
+export interface UIUXComponentRecommendation {
+  name: string;
+  type: string;
+  library: string;
+  rationale: string;
+}
+
+export interface UIUXDesignContent {
+  screens: UIUXScreen[];
+  userFlows: UIUXUserFlow[];
+  wireframes: UIUXWireframe[];
+  componentRecommendations: UIUXComponentRecommendation[];
   uxRecommendations: string[];
+}
+
+export interface SecurityThreat {
+  threat: string;
+  impact: string;
+  likelihood: string;
+  mitigation: string;
+}
+
+export interface SecurityControlItem {
+  control: string;
+  category: string;
+  implementation: string;
 }
 
 export interface SecurityReportContent {
@@ -329,7 +368,7 @@ export interface SecurityReportContent {
     controls: string[];
     patterns: string[];
   };
-  threatModel: string[];
+  threatModel: SecurityThreat[];
   authentication: {
     strategy: string;
     providers: string[];
@@ -342,8 +381,37 @@ export interface SecurityReportContent {
     permissions: string[];
     policies: string[];
   };
-  securityControls: string[];
+  securityControls: SecurityControlItem[];
   securityChecklist: string[];
+}
+
+export interface GovernanceControl {
+  control: string;
+  framework: string;
+  requirement: string;
+  implementation: string;
+}
+
+export interface AuditRequirement {
+  requirement: string;
+  frequency: string;
+  evidence: string;
+  responsible: string;
+}
+
+export interface DataRetentionPolicy {
+  dataType: string;
+  retentionPeriod: string;
+  deletionMethod: string;
+  justification: string;
+}
+
+export interface RiskAssessmentItem {
+  risk: string;
+  likelihood: string;
+  impact: string;
+  mitigation: string;
+  owner: string;
 }
 
 export interface ComplianceReportContent {
@@ -352,10 +420,10 @@ export interface ComplianceReportContent {
     gaps: string[];
     recommendations: string[];
   };
-  governanceControls: string[];
-  auditRequirements: string[];
-  dataRetentionPolicies: string[];
-  riskAssessment: string[];
+  governanceControls: GovernanceControl[];
+  auditRequirements: AuditRequirement[];
+  dataRetentionPolicies: DataRetentionPolicy[];
+  riskAssessment: RiskAssessmentItem[];
 }
 
 export interface GeneratedCodeContent {

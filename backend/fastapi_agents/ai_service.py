@@ -13,12 +13,19 @@ transparently, as the final fallback used only when neither cloud key above
 is configured. Nothing in this file decides which backend actually serves a
 call — that's entirely LLMService's job.
 
-If none of that resolves to real output (or DEMO_MODE is on), functions fall
-back to a rich, deterministic mock so the platform still demos with zero API
-keys configured. The mock responses are not stubs — they contain the exact
-banking-portal artefacts committed in seed.py, formatted as structured dicts
-that the endpoint handlers unpack into GeneratedArtifact rows and Pydantic
-responses.
+Only when the deployment-wide DEMO_MODE flag is explicitly turned on (it is
+off by default — see backend/.env.example) do these functions return the
+rich, deterministic mock payloads below immediately, without calling an LLM
+at all — an explicit, admin-controlled "run this whole platform in demo
+mode" switch, not a silent per-request fallback.
+
+Outside of DEMO_MODE, if the real LLM call fails or returns unusable output,
+the function raises AIGenerationError instead of substituting mock content.
+Fabricating a "successful" response would be indistinguishable from a real
+AI-generated artefact in the UI, so failures are surfaced as real errors:
+agent_runner.py's _safe_execute marks the agent_run FAILED and broadcasts the
+error over the websocket, and routes called directly (outside the pipeline)
+convert AIGenerationError into an HTTP 502 with the failure detail.
 """
 from __future__ import annotations
 from .agents.presentation_video_agent import (
@@ -36,6 +43,18 @@ from .agents.llm_service import LLMService, CloudProviderConfig, build_cloud_con
 from .models import DEMO_MODE
 
 logger = logging.getLogger(__name__)
+
+
+class AIGenerationError(RuntimeError):
+    """Raised when a real AI generation call fails for an implemented agent.
+
+    Implemented agents (requirements, user stories, architecture, database
+    schema, API design, UI/UX, security, compliance, documentation, review)
+    must never substitute fabricated content for a genuine failure — callers
+    are expected to surface this as a real error (HTTP 502 from routes that
+    call generation directly, or a FAILED agent_run from agent_runner.py's
+    _safe_execute, which already handles any raised exception correctly).
+    """
 from .agents.requirement_agent import RequirementAgent
 from .agents.ba_agent import BusinessAnalystAgent
 from .agents.architect_agent import ArchitectAgent
@@ -340,25 +359,25 @@ _MOCK_API_DESIGN: dict[str, Any] = {
     "api_style": "REST",
     "base_url": "http://localhost:8000",
     "endpoints": [
-        {"method": "POST", "path": "/auth/login", "summary": "Authenticate and receive HttpOnly JWT cookies", "auth_required": False,
-         "request_body": {"email": "string", "password": "string"},
-         "response_shape": {"id": "int", "email": "string", "full_name": "string", "role": "string"}},
-        {"method": "GET", "path": "/auth/me", "summary": "Return current user from cookie", "auth_required": True,
+        {"method": "POST", "path": "/auth/login", "description": "Authenticate and receive HttpOnly JWT cookies", "auth_required": False,
+         "request_body": '{"email": "string", "password": "string"}',
+         "response": '{"id": "int", "email": "string", "full_name": "string", "role": "string"}'},
+        {"method": "GET", "path": "/auth/me", "description": "Return current user from cookie", "auth_required": True,
          "request_body": None,
-         "response_shape": {"id": "int", "email": "string", "full_name": "string"}},
-        {"method": "GET", "path": "/accounts", "summary": "List all accounts for the authenticated customer", "auth_required": True,
+         "response": '{"id": "int", "email": "string", "full_name": "string"}'},
+        {"method": "GET", "path": "/accounts", "description": "List all accounts for the authenticated customer", "auth_required": True,
          "request_body": None,
-         "response_shape": {"accounts": [{"id": "int", "account_number": "string", "balance": "float"}]}},
-        {"method": "GET", "path": "/accounts/{id}", "summary": "Single account detail", "auth_required": True,
-         "request_body": None, "response_shape": {"id": "int", "account_number": "string", "balance": "float", "currency": "string"}},
-        {"method": "GET", "path": "/transactions", "summary": "Paginated transaction history with filters", "auth_required": True,
+         "response": '{"accounts": [{"id": "int", "account_number": "string", "balance": "float"}]}'},
+        {"method": "GET", "path": "/accounts/{id}", "description": "Single account detail", "auth_required": True,
+         "request_body": None, "response": '{"id": "int", "account_number": "string", "balance": "float", "currency": "string"}'},
+        {"method": "GET", "path": "/transactions", "description": "Paginated transaction history with filters", "auth_required": True,
          "request_body": None,
-         "response_shape": {"transactions": [{"id": "int", "amount": "float", "transaction_type": "string", "occurred_at": "datetime"}], "total": "int", "page": "int"}},
-        {"method": "POST", "path": "/transactions", "summary": "Post a new debit or credit transaction", "auth_required": True,
-         "request_body": {"account_id": "int", "transaction_type": "string", "amount": "float", "description": "string"},
-         "response_shape": {"id": "int", "status": "string"}},
-        {"method": "GET", "path": "/transactions/{id}", "summary": "Single transaction detail", "auth_required": True,
-         "request_body": None, "response_shape": {"id": "int", "amount": "float", "description": "string", "occurred_at": "datetime"}},
+         "response": '{"transactions": [{"id": "int", "amount": "float", "transaction_type": "string", "occurred_at": "datetime"}], "total": "int", "page": "int"}'},
+        {"method": "POST", "path": "/transactions", "description": "Post a new debit or credit transaction", "auth_required": True,
+         "request_body": '{"account_id": "int", "transaction_type": "string", "amount": "float", "description": "string"}',
+         "response": '{"id": "int", "status": "string"}'},
+        {"method": "GET", "path": "/transactions/{id}", "description": "Single transaction detail", "auth_required": True,
+         "request_body": None, "response": '{"id": "int", "amount": "float", "description": "string", "occurred_at": "datetime"}'},
     ],
     "openapi_yaml": """\
 openapi: '3.0.3'
@@ -406,58 +425,6 @@ paths:
 """,
 }
 
-# ---------------------------------------------------------------------------
-# Review mock payloads keyed by review_type
-# ---------------------------------------------------------------------------
-
-_MOCK_REVIEWS: dict[str, dict[str, Any]] = {
-    "architecture": {
-        "score": 92.0, "risk_level": "low",
-        "summary": "The modular monolith pattern is appropriate for the demo scope. Service boundaries are clearly defined and the chosen tech stack is well-supported.",
-        "findings": [
-            {"severity": "minor", "category": "Scalability", "description": "No horizontal scaling strategy defined for the monolith.", "recommendation": "Add a note on extracting auth-service first if user volume exceeds 10k concurrent."},
-            {"severity": "info", "category": "Observability", "description": "No distributed tracing configured.", "recommendation": "Add OpenTelemetry instrumentation before production."},
-        ],
-        "recommendations": ["Add rate-limiting at the API gateway layer", "Document the service extraction roadmap", "Include health-check endpoints per service"],
-    },
-    "database": {
-        "score": 88.0, "risk_level": "low",
-        "summary": "Schema is well-normalised. FK constraints and indexes are in place. Minor improvements recommended for production readiness.",
-        "findings": [
-            {"severity": "minor", "category": "Indexing", "description": "No index on transactions.occurred_at for date-range queries.", "recommendation": "CREATE INDEX idx_transactions_occurred_at ON transactions(occurred_at);"},
-            {"severity": "info", "category": "Auditing", "description": "No updated_at column on accounts or transactions.", "recommendation": "Add updated_at TIMESTAMPTZ DEFAULT now() with a trigger for audit compliance."},
-        ],
-        "recommendations": ["Add occurred_at index", "Add soft-delete (deleted_at) columns", "Partition transactions table by month for large data volumes"],
-    },
-    "ui": {
-        "score": 85.0, "risk_level": "low",
-        "summary": "UI components follow React best practices. State management is clean. Accessibility improvements recommended.",
-        "findings": [
-            {"severity": "minor", "category": "Accessibility", "description": "Form inputs on LoginPage missing aria-label attributes.", "recommendation": "Add aria-label to email and password inputs."},
-            {"severity": "info", "category": "Performance", "description": "Dashboard fetches accounts and transactions in serial.", "recommendation": "Use Promise.all() to fetch in parallel."},
-        ],
-        "recommendations": ["Add ARIA labels to all form inputs", "Implement loading skeletons", "Add error boundary components"],
-    },
-    "code": {
-        "score": 90.0, "risk_level": "low",
-        "summary": "Code quality is high. No hardcoded secrets detected. Error handling is consistent. Minor improvements flagged.",
-        "findings": [
-            {"severity": "info", "category": "Security", "description": "No rate-limiting on POST /auth/login.", "recommendation": "Add express-rate-limit or slowapi (FastAPI) to the login endpoint."},
-            {"severity": "minor", "category": "Maintainability", "description": "Magic number 20 for default page size not extracted to a constant.", "recommendation": "Define DEFAULT_PAGE_SIZE = 20 in a config module."},
-        ],
-        "recommendations": ["Add rate-limiting to auth endpoints", "Extract magic numbers to constants", "Add request-id header for traceability"],
-    },
-    "security": {
-        "score": 88.0, "risk_level": "medium",
-        "summary": "OWASP Top 10 review complete. JWT implementation is correct. Passwords are bcrypt-hashed. Two medium-priority items require attention.",
-        "findings": [
-            {"severity": "major", "category": "A07 Authentication", "description": "No brute-force protection on /auth/login.", "recommendation": "Implement account lockout after 5 failed attempts within 10 minutes.", "line_reference": "main.py:login()"},
-            {"severity": "major", "category": "A05 Security Misconfiguration", "description": "COOKIE_SECURE defaults to False — cookies sent over plain HTTP in dev.", "recommendation": "Ensure COOKIE_SECURE=true in all non-local environments.", "line_reference": "main.py:COOKIE_SECURE"},
-            {"severity": "info", "category": "A02 Cryptographic Failures", "description": "Default JWT secret key committed in source.", "recommendation": "Rotate JWT_SECRET_KEY and JWT_REFRESH_SECRET_KEY via environment variables before any shared deployment.", "line_reference": "main.py:JWT_SECRET_KEY"},
-        ],
-        "recommendations": ["Add brute-force protection to login", "Enforce COOKIE_SECURE in staging/production", "Rotate all default secret keys", "Add Content-Security-Policy header"],
-    },
-}
 
 
 # ---------------------------------------------------------------------------
@@ -474,8 +441,8 @@ def generate_requirements(db, project_id: int, context: str = "", document_ids: 
         data.setdefault("assumptions", data.get("dependencies", []))
         return data
     except Exception as exc:
-        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_requirements", exc)
-        return _MOCK_REQUIREMENTS
+        logger.error("[ai_service] generate_requirements failed: %s", exc)
+        raise AIGenerationError(f"Requirements generation failed: {exc}") from exc
 
 
 def generate_user_stories(db, project_id: int, requirements_text: str):
@@ -486,8 +453,8 @@ def generate_user_stories(db, project_id: int, requirements_text: str):
         result = agent.run(requirements_text)
         return result.model_dump() if hasattr(result, "model_dump") else result
     except Exception as exc:
-        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_user_stories", exc)
-        return _MOCK_USER_STORIES
+        logger.error("[ai_service] generate_user_stories failed: %s", exc)
+        raise AIGenerationError(f"User story generation failed: {exc}") from exc
 
 
 def generate_architecture(db, project_id: int, context: str) -> dict[str, Any]:
@@ -504,8 +471,8 @@ def generate_architecture(db, project_id: int, context: str) -> dict[str, Any]:
         result = agent.run(context)
         return result.model_dump() if hasattr(result, "model_dump") else result
     except Exception as exc:
-        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_architecture", exc)
-        return _MOCK_ARCHITECTURE
+        logger.error("[ai_service] generate_architecture failed: %s", exc)
+        raise AIGenerationError(f"Architecture generation failed: {exc}") from exc
 
 
 
@@ -577,8 +544,8 @@ def generate_uiux(db, project_id: int, context: str, requirements: Any | None = 
         result = agent.run(project_description=context, requirements=requirements, user_stories=None)
         return result.model_dump() if hasattr(result, "model_dump") else result
     except Exception as exc:
-        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_uiux", exc)
-        return {"screens": [], "userFlows": [], "wireframes": [], "componentRecommendations": [], "uxRecommendations": []}
+        logger.error("[ai_service] generate_uiux failed: %s", exc)
+        raise AIGenerationError(f"UI/UX generation failed: {exc}") from exc
 
 
 def generate_security(db, project_id: int, context: str, architecture: Any | None = None) -> dict[str, Any]:
@@ -597,29 +564,8 @@ def generate_security(db, project_id: int, context: str, architecture: Any | Non
         result = agent.run(project_description=context, architecture=architecture)
         return result.model_dump() if hasattr(result, "model_dump") else result
     except Exception as exc:
-        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_security", exc)
-        return {
-            "securityArchitecture": {
-                "layers": [],
-                "controls": [],
-                "patterns": [],
-            },
-            "threatModel": [],
-            "authentication": {
-                "strategy": "",
-                "providers": [],
-                "mfa": False,
-                "sessionManagement": "",
-            },
-            "authorization": {
-                "model": "",
-                "roles": [],
-                "permissions": [],
-                "policies": [],
-            },
-            "securityControls": [],
-            "securityChecklist": [],
-        }
+        logger.error("[ai_service] generate_security failed: %s", exc)
+        raise AIGenerationError(f"Security architecture generation failed: {exc}") from exc
 
 
 def generate_compliance(db, project_id: int, context: str, requirements: Any | None = None, architecture: Any | None = None) -> dict[str, Any]:
@@ -644,19 +590,60 @@ def generate_compliance(db, project_id: int, context: str, requirements: Any | N
         )
         return result.model_dump() if hasattr(result, "model_dump") else result
     except Exception as exc:
-        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_compliance", exc)
-        return {
-            "complianceAssessment": {
-                "standards": [],
-                "gaps": [],
-                "recommendations": [],
-            },
-            "governanceControls": [],
-            "auditRequirements": [],
-            "dataRetentionPolicies": [],
-            "riskAssessment": [],
-        }
+        logger.error("[ai_service] generate_compliance failed: %s", exc)
+        raise AIGenerationError(f"Compliance generation failed: {exc}") from exc
 
+
+
+class _DBColumn(BaseModel):
+    name: str
+    type: str
+    nullable: bool = True
+    default: str | None = None
+    description: str = ""
+
+
+class _DBTable(BaseModel):
+    name: str
+    columns: list[_DBColumn] = []
+    primary_key: list[str] = []
+    unique_constraints: list[str] = []
+    indexes: list[str] = []
+    design_rationale: str = ""
+
+
+class _DBRelationship(BaseModel):
+    from_table: str
+    to_table: str
+    type: str = "one-to-many"
+    foreign_key: str = ""
+    on_delete: str = "CASCADE"
+
+
+class _DBMigration(BaseModel):
+    version: str
+    up: list[str] = []
+    down: list[str] = []
+
+
+class _DBDesignDecision(BaseModel):
+    decision: str
+    rationale: str = ""
+
+
+class DatabaseSchemaResult(BaseModel):
+    database_type: str = "PostgreSQL"
+    tables: list[_DBTable] = []
+    relationships: list[_DBRelationship] = []
+    er_diagram: str = ""
+    migrations: list[_DBMigration] = []
+    scaling_strategy: str = ""
+    partitioning_recommendations: str = ""
+    design_decisions: list[_DBDesignDecision] = []
+    sql_ddl: str = ""
+    normalization_notes: str = ""
+    audit_tables: list[str] = []
+    sample_data: dict[str, list[dict[str, Any]]] = {}
 
 
 _DATABASE_SYSTEM_PROMPT = """You are a Principal Database Architect producing a COMPLETE, enterprise-grade schema deliverable — not a sketch. A development team must be able to create the schema and start writing queries directly from this document. No placeholder text, no "TBD". Every design decision must be explained (what the table is for, why it's shaped this way, why a column has that type/constraint).
@@ -689,13 +676,32 @@ def generate_database_schema(db, project_id: int, context: str) -> dict[str, Any
         return _MOCK_DATABASE_SCHEMA
     try:
         llm = LLMService(db=db, project_id=project_id, role="database", timeout=170)
-        raw = llm.generate_text(_DATABASE_SYSTEM_PROMPT, context, temperature=0.2)
-        result = json.loads(raw)
-        if result:
-            return result
+        result = llm.generate_json(_DATABASE_SYSTEM_PROMPT, context, schema=DatabaseSchemaResult)
+        if not result.tables:
+            raise ValueError("LLM returned a schema with zero tables")
+        return result.model_dump()
     except Exception as exc:
-        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_database_schema", exc)
-    return _MOCK_DATABASE_SCHEMA
+        logger.error("[ai_service] generate_database_schema failed: %s", exc)
+        raise AIGenerationError(f"Database schema generation failed: {exc}") from exc
+
+
+class _ApiEndpoint(BaseModel):
+    method: str
+    path: str
+    description: str = ""
+    request_body: str | None = None
+    response: str = ""
+    auth_required: bool = True
+
+
+class ApiDesignResult(BaseModel):
+    api_style: str = "REST"
+    base_url: str = "/api/v1"
+    endpoints: list[_ApiEndpoint] = []
+    authentication_strategy: str = ""
+    rate_limiting: str = ""
+    versioning_strategy: str = ""
+    openapi_yaml: str = ""
 
 
 _API_DESIGN_SYSTEM_PROMPT = """You are a Principal API Architect. Design a complete REST API for the given project — real resources and endpoints grounded in the business context, not generic CRUD placeholders.
@@ -718,13 +724,13 @@ def generate_api_design(db, project_id: int, context: str) -> dict[str, Any]:
         return _MOCK_API_DESIGN
     try:
         llm = LLMService(db=db, project_id=project_id, role="architect", timeout=170)
-        raw = llm.generate_text(_API_DESIGN_SYSTEM_PROMPT, context, temperature=0.2)
-        result = json.loads(raw)
-        if result:
-            return result
+        result = llm.generate_json(_API_DESIGN_SYSTEM_PROMPT, context, schema=ApiDesignResult)
+        if not result.endpoints:
+            raise ValueError("LLM returned an API design with zero endpoints")
+        return result.model_dump()
     except Exception as exc:
-        logger.warning("[ai_service] %s failed: %s — falling back to mock", "generate_api_design", exc)
-    return _MOCK_API_DESIGN
+        logger.error("[ai_service] generate_api_design failed: %s", exc)
+        raise AIGenerationError(f"API design generation failed: {exc}") from exc
 
 
 class ComponentSpec(BaseModel):
@@ -1095,21 +1101,42 @@ def generate_documentation(db, project_id: int, context: str) -> dict[str, Any]:
         result = llm.generate_json(_DOCUMENTATION_SYSTEM_PROMPT, context, schema=_DocsPlanOut)
         return result.model_dump()
     except Exception as exc:
-        logger.warning("[ai_service] %s failed: %s — falling back to static plan", "generate_documentation", exc)
-        return _DOCUMENTATION_DEMO_PLAN
+        logger.error("[ai_service] generate_documentation failed: %s", exc)
+        raise AIGenerationError(f"Documentation generation failed: {exc}") from exc
+
+
+class _ReviewFinding(BaseModel):
+    severity: str = "info"
+    category: str = ""
+    description: str = ""
+    recommendation: str = ""
+    line_reference: str | None = None
+
+
+class ReviewOutcome(BaseModel):
+    score: float
+    risk_level: str = "medium"
+    summary: str = ""
+    findings: list[_ReviewFinding] = []
+    recommendations: list[str] = []
 
 
 def run_review(db, project_id: int, review_type: str, artifact_content: str) -> dict[str, Any]:
-    system = f"You are a senior {review_type} reviewer. Analyse the provided artefact and return JSON only with keys: score (0-100), risk_level, summary, findings[], recommendations[]."
+    system = f"""You are a senior {review_type} reviewer. Analyse the provided artefact and return ONLY valid JSON with this exact shape:
+{{
+  "score": 0-100,
+  "risk_level": "low|medium|high|critical",
+  "summary": "string — one paragraph overall assessment",
+  "findings": [{{"severity": "info|minor|major|critical", "category": "string", "description": "string", "recommendation": "string", "line_reference": "string or null"}}],
+  "recommendations": ["string — top-level action items"]
+}}"""
     try:
         llm = LLMService(db=db, project_id=project_id, role="review", timeout=170)
-        raw = llm.generate_text(system, artifact_content, temperature=0.2)
-        result = json.loads(raw)
-        if result:
-            return result
+        result = llm.generate_json(system, artifact_content, schema=ReviewOutcome)
+        return result.model_dump()
     except Exception as exc:
-        logger.warning("[ai_service] %s failed: %s — falling back to mock", "run_review ({review_type})", exc)
-    return _MOCK_REVIEWS.get(review_type, _MOCK_REVIEWS["code"])
+        logger.error("[ai_service] run_review (%s) failed: %s", review_type, exc)
+        raise AIGenerationError(f"{review_type.title()} review failed: {exc}") from exc
 
 
 def test_provider(

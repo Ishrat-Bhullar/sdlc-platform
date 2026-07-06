@@ -261,10 +261,10 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
     const data = getArtifact('uiux_design') || getArtifact('ui_ux_design');
     if (!data) return null;
     return {
-      screens: (data.screens as string[]) || [],
-      userFlows: (data.userFlows as string[]) || [],
-      wireframes: (data.wireframes as string[]) || [],
-      componentRecommendations: (data.componentRecommendations as string[]) || [],
+      screens: (data.screens as UIUXDesignContent['screens']) || [],
+      userFlows: (data.userFlows as UIUXDesignContent['userFlows']) || [],
+      wireframes: (data.wireframes as UIUXDesignContent['wireframes']) || [],
+      componentRecommendations: (data.componentRecommendations as UIUXDesignContent['componentRecommendations']) || [],
       uxRecommendations: (data.uxRecommendations as string[]) || [],
     };
   }, [getArtifact]);
@@ -274,10 +274,10 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
     if (!data) return null;
     return {
       securityArchitecture: (data.securityArchitecture as any) || {},
-      threatModel: (data.threatModel as string[]) || [],
+      threatModel: (data.threatModel as SecurityReportContent['threatModel']) || [],
       authentication: (data.authentication as any) || {},
       authorization: (data.authorization as any) || {},
-      securityControls: (data.securityControls as string[]) || [],
+      securityControls: (data.securityControls as SecurityReportContent['securityControls']) || [],
       securityChecklist: (data.securityChecklist as string[]) || [],
     };
   }, [getArtifact]);
@@ -287,10 +287,10 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
     if (!data) return null;
     return {
       complianceAssessment: (data.complianceAssessment as any) || {},
-      governanceControls: (data.governanceControls as string[]) || [],
-      auditRequirements: (data.auditRequirements as string[]) || [],
-      dataRetentionPolicies: (data.dataRetentionPolicies as string[]) || [],
-      riskAssessment: (data.riskAssessment as string[]) || [],
+      governanceControls: (data.governanceControls as ComplianceReportContent['governanceControls']) || [],
+      auditRequirements: (data.auditRequirements as ComplianceReportContent['auditRequirements']) || [],
+      dataRetentionPolicies: (data.dataRetentionPolicies as ComplianceReportContent['dataRetentionPolicies']) || [],
+      riskAssessment: (data.riskAssessment as ComplianceReportContent['riskAssessment']) || [],
     };
   }, [getArtifact]);
 

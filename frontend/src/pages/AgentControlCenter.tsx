@@ -29,7 +29,7 @@ import {
   Brain,
   BookOpen,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Card, StatusBadge, ProgressBar, PreviewBadge } from '../components/ui/Card';
 import { mockAgents } from '../data/mockData';
 import type { Agent } from '../types';
 
@@ -86,8 +86,11 @@ export function AgentControlCenter() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-text-primary">Agent Control Center</h1>
-          <p className="mt-1 text-sm text-text-muted">Manage and monitor all AI agents</p>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-text-primary">Agent Control Center</h1>
+            <PreviewBadge />
+          </div>
+          <p className="mt-1 text-sm text-text-muted">Manage and monitor all AI agents — showcasing planned functionality with sample data</p>
         </div>
         <div className="flex items-center gap-3">
           <button className="btn-ghost text-sm">

@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -23,7 +23,7 @@ import { Card } from '../components/ui/Card';
 import { NewProjectWizard } from '../components/shared/NewProjectWizard';
 import { useAuth } from '../lib/auth';
 import { apiRequest, FASTAPI_BASE_URL } from '../lib/api';
-import { mockProjects, mockProjectTemplates } from '../data/mockData';
+import { mockProjectTemplates } from '../data/mockData';
 
 const uploadOptions = [
   { id: 'brd', label: 'BRD Upload', icon: FileText, description: 'Business Requirements Document' },
@@ -77,6 +77,14 @@ type ProjectResponse = {
   description: string | null;
 };
 
+type RecentProject = {
+  id: number;
+  name: string;
+  description: string | null;
+  status: string;
+  created_at: string;
+};
+
 export function AIWorkspace() {
   const [prompt, setPrompt] = useState('');
   const [isExpanded, setIsExpanded] = useState(false);
@@ -90,9 +98,38 @@ export function AIWorkspace() {
   const [activeProject, setActiveProject] = useState<ProjectResponse | null>(null);
   const [uploadingDoc, setUploadingDoc] = useState(false);
   const [uploadDocType, setUploadDocType] = useState<string>('brd');
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
+  const [recentProjectsError, setRecentProjectsError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
   const { user } = useAuth();
+
+  useEffect(() => {
+    // This page is also the public landing route ("/"), reachable while
+    // signed out — don't fire the request (and don't surface its 401 as a
+    // scary error) until a session actually exists.
+    if (!user) {
+      setRecentProjects([]);
+      setRecentProjectsError(null);
+      return;
+    }
+    let active = true;
+    apiRequest<{ projects?: RecentProject[] } | RecentProject[]>('/projects')
+      .then((data) => {
+        if (!active) return;
+        const rows = Array.isArray(data) ? data : (Array.isArray(data?.projects) ? data.projects : []);
+        setRecentProjects(
+          [...rows]
+            .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+            .slice(0, 3)
+        );
+        setRecentProjectsError(null);
+      })
+      .catch((err) => {
+        if (active) setRecentProjectsError(err instanceof Error ? err.message : 'Failed to load recent projects');
+      });
+    return () => { active = false; };
+  }, [user]);
 
   const projectNameFromDescription = (projectDescription: string) => {
     const firstClause = projectDescription.split(/[.!?]/)[0]?.trim();
@@ -401,8 +438,19 @@ export function AIWorkspace() {
               <ChevronRight className="h-4 w-4" />
             </button>
           </div>
+          {!user && (
+            <p className="mb-4 text-sm text-text-muted">
+              <button onClick={() => navigate('/signin')} className="text-ey-yellow hover:underline">Sign in</button> to see your recent projects.
+            </p>
+          )}
+          {user && recentProjectsError && (
+            <p className="mb-4 text-sm text-status-error">{recentProjectsError}</p>
+          )}
+          {user && !recentProjectsError && recentProjects.length === 0 && (
+            <p className="mb-4 text-sm text-text-muted">No projects yet — create one above to get started.</p>
+          )}
           <div className="grid gap-4 md:grid-cols-3">
-            {mockProjects.map((project) => (
+            {recentProjects.map((project) => (
               <Card
                 key={project.id}
                 hover
@@ -415,29 +463,22 @@ export function AIWorkspace() {
                       <h3 className="font-medium text-text-primary">{project.name}</h3>
                       <span
                         className={`h-2 w-2 rounded-full ${
-                          project.status === 'active'
+                          project.status === 'in_progress'
                             ? 'bg-status-success'
-                            : project.status === 'paused'
-                              ? 'bg-status-warning'
+                            : project.status === 'completed'
+                              ? 'bg-status-info'
                               : 'bg-text-muted'
                         }`}
                       />
                     </div>
                     <p className="mt-1 text-xs text-text-muted line-clamp-2">{project.description}</p>
                   </div>
-                  <div className="flex flex-col items-end gap-1">
-                    <span className="text-sm font-semibold text-ey-yellow">{project.progress}%</span>
-                    <span className="text-xs text-text-muted">Complete</span>
-                  </div>
+                  <span className="text-xs capitalize text-text-muted">{project.status.replace('_', ' ')}</span>
                 </div>
                 <div className="mt-4 flex items-center gap-3 text-xs text-text-muted">
                   <div className="flex items-center gap-1">
                     <Clock className="h-3 w-3" />
-                    {project.updatedAt.toLocaleDateString()}
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <Zap className="h-3 w-3" />
-                    {project.agents.filter((a) => a.status === 'running').length} active
+                    {new Date(project.created_at).toLocaleDateString()}
                   </div>
                 </div>
               </Card>

@@ -11,7 +11,7 @@ import {
   RefreshCw,
   Play,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Card, StatusBadge, ProgressBar, PreviewBadge } from '../components/ui/Card';
 import { Accordion, AccordionItem, BulletList, DataTable } from '../components/ui/Accordion';
 import { CodeBlock } from '../components/ui/CodeBlock';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
@@ -84,6 +84,10 @@ export function TestingWorkspace() {
   if (!testReport) {
     return (
       <div className="space-y-6">
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-text-primary">Testing Workspace</h1>
+          <PreviewBadge label="Preview — Agent Under Development" />
+        </div>
         <Card className="py-10 text-center">
           <TestTube className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
           <p className="text-sm text-text-muted">No test report generated yet.</p>
@@ -104,7 +108,10 @@ export function TestingWorkspace() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-text-primary">Testing Workspace</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-text-primary">Testing Workspace</h1>
+            <PreviewBadge label="Preview — Agent Under Development" />
+          </div>
           <p className="mt-1 text-sm text-text-muted">Test suites, coverage, and quality metrics</p>
         </div>
         <div className="flex items-center gap-2">

@@ -70,6 +70,25 @@ export function KPICard({ title, value, change, trend, icon, color = 'gray' }: K
   );
 }
 
+interface PreviewBadgeProps {
+  label?: string;
+  className?: string;
+}
+
+/**
+ * Marks a module that isn't wired to a real backend agent yet (or whose
+ * output isn't production-grade yet) so users don't mistake demo/preview
+ * content for a genuine AI-generated result.
+ */
+export function PreviewBadge({ label = 'Preview — Planned Functionality', className = '' }: PreviewBadgeProps) {
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full border border-ey-yellow/30 bg-ey-yellow/10 px-3 py-1 text-xs font-medium text-ey-yellow ${className}`}>
+      <span className="h-1.5 w-1.5 rounded-full bg-ey-yellow" />
+      {label}
+    </span>
+  );
+}
+
 interface StatusBadgeProps {
   status: string;
   children: ReactNode;

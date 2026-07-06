@@ -13,7 +13,7 @@ import {
   Copy,
   Eye,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Card, StatusBadge, ProgressBar, PreviewBadge } from '../components/ui/Card';
 import { Accordion, AccordionItem, BulletList, DataTable } from '../components/ui/Accordion';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
@@ -90,6 +90,10 @@ export function FrontendWorkspace() {
   if (!frontendCode) {
     return (
       <div className="space-y-6">
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-text-primary">Frontend Workspace</h1>
+          <PreviewBadge label="Preview — Agent Under Development" />
+        </div>
         <Card className="py-10 text-center">
           <Code2 className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
           <p className="text-sm text-text-muted">No frontend code generated yet.</p>
@@ -111,7 +115,10 @@ export function FrontendWorkspace() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-text-primary">Frontend Workspace</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-text-primary">Frontend Workspace</h1>
+            <PreviewBadge label="Preview — Agent Under Development" />
+          </div>
           <p className="mt-1 text-sm text-text-muted">React components, pages, and application code</p>
         </div>
         <div className="flex items-center gap-2">

@@ -92,6 +92,11 @@ class VideoComposer:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             stderr = exc.stderr.decode(errors="ignore") if exc.stderr else str(exc)
             raise RuntimeError(f"[VideoComposer] ffmpeg clip encoding failed: {stderr[-800:]}") from exc
+        except FileNotFoundError as exc:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise RuntimeError(
+                "[VideoComposer] ffmpeg is not installed or not on PATH — video rendering requires ffmpeg"
+            ) from exc
         return clip_paths, tmp_dir
 
     def _concat(self, clip_paths: list[Path], out_path: Path, *, extra_vf: str | None) -> None:
@@ -115,3 +120,7 @@ class VideoComposer:
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.decode(errors="ignore") if exc.stderr else str(exc)
             raise RuntimeError(f"[VideoComposer] ffmpeg encoding failed: {stderr[-800:]}") from exc
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "[VideoComposer] ffmpeg is not installed or not on PATH — video rendering requires ffmpeg"
+            ) from exc

@@ -17,7 +17,7 @@ import {
   Bell,
   BellOff,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Card, StatusBadge, ProgressBar, PreviewBadge } from '../components/ui/Card';
 import { mockAlerts } from '../data/mockData';
 import {
   LineChart,
@@ -66,8 +66,11 @@ export function MonitoringCenter() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-text-primary">Monitoring Center</h1>
-          <p className="mt-1 text-sm text-text-muted">System health, metrics, and alerting</p>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-text-primary">Monitoring Center</h1>
+            <PreviewBadge />
+          </div>
+          <p className="mt-1 text-sm text-text-muted">System health, metrics, and alerting — showcasing planned functionality with sample data</p>
         </div>
         <div className="flex items-center gap-3">
           {criticalAlerts > 0 && (

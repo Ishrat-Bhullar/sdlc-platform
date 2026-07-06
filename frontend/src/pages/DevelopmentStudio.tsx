@@ -21,7 +21,7 @@ import {
   Pause,
   Eye,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Card, StatusBadge, ProgressBar, PreviewBadge } from '../components/ui/Card';
 import { mockGeneratedFiles, mockAgents } from '../data/mockData';
 
 interface FileNode {
@@ -245,8 +245,11 @@ export const LoginForm: React.FC<LoginFormProps> = ({ onSuccess, onRegister }) =
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-text-primary">Development Studio</h1>
-          <p className="mt-1 text-sm text-text-muted">Real-time code generation workspace</p>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-text-primary">Development Studio</h1>
+            <PreviewBadge />
+          </div>
+          <p className="mt-1 text-sm text-text-muted">Real-time code generation workspace — showcasing planned functionality with sample data</p>
         </div>
         <div className="flex items-center gap-4">
           {/* Current Agent */}
