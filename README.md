@@ -194,12 +194,14 @@ cd Autonomous-SDLC-Platform
 Install frontend dependencies
 
 ```bash
+cd frontend
 npm install
 ```
 
 Run frontend
 
 ```bash
+cd frontend
 npm run dev
 ```
 
@@ -212,6 +214,7 @@ pip install -r requirements.txt
 Run backend
 
 ```bash
+cd backend
 uvicorn fastapi_agents.main:app --reload
 ```
 
