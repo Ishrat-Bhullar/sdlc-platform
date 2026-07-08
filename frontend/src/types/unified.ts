@@ -347,6 +347,7 @@ export interface UIUXDesignContent {
   wireframes: UIUXWireframe[];
   componentRecommendations: UIUXComponentRecommendation[];
   uxRecommendations: string[];
+  ui_spec?: any;
 }
 
 export interface SecurityThreat {

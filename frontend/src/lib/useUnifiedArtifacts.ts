@@ -266,6 +266,7 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
       wireframes: (data.wireframes as UIUXDesignContent['wireframes']) || [],
       componentRecommendations: (data.componentRecommendations as UIUXDesignContent['componentRecommendations']) || [],
       uxRecommendations: (data.uxRecommendations as string[]) || [],
+      ui_spec: (data.ui_spec as any) || {},
     };
   }, [getArtifact]);
 
