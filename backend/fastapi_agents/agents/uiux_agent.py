@@ -180,16 +180,72 @@ class UIUXDesignAgent:
 
         if DEMO_MODE:
             result = UIUXDesignOutput(
-                screens=[
-                    Screen(name="Dashboard", purpose="Main overview", components=["Header", "Sidebar", "KPI Cards", "Chart"]),
-                    Screen(name="Projects", purpose="List all projects", components=["Table", "Search Bar", "Pagination"]),
-                    Screen(name="Settings", purpose="User preferences", components=["Form", "Tabs"]),
-                ],
-                userFlows=[UserFlow(name="Main Flow", steps=["Login", "View Dashboard", "Edit Settings"], screens=["Dashboard", "Settings"])],
-                wireframes=[Wireframe(screen="Dashboard", layout="Grid layout", description="Sidebar on left, main content on right")],
-                componentRecommendations=[ComponentRecommendation(name="Button", type="Action", rationale="Primary action")],
-                uxRecommendations=["Use high contrast for accessibility", "Keep navigation sticky"],
+                screens=[Screen(name="Dashboard", purpose="Demo mode")],
+                userFlows=[],
+                wireframes=[],
+                componentRecommendations=[],
+                uxRecommendations=[],
             )
+            # Inject a fully structured React Flow visual UI as the fallback for DEMO_MODE
+            result.ui_spec = {
+                "pages": [
+                    {
+                        "page_name": "Demo Dashboard",
+                        "path": "/demo",
+                        "component_tree": [
+                            {
+                                "id": "demo-nav",
+                                "type": "container",
+                                "props": {
+                                    "className": "w-full h-16 bg-gradient-to-r from-indigo-900 to-purple-900 flex items-center justify-between px-8 shadow-2xl",
+                                    "style": {}
+                                }
+                            },
+                            {
+                                "id": "demo-logo",
+                                "type": "text",
+                                "props": {
+                                    "content": "SDLC Platform (Demo Mode)",
+                                    "className": "text-2xl font-bold text-white tracking-widest",
+                                    "style": {}
+                                }
+                            },
+                            {
+                                "id": "demo-main",
+                                "type": "container",
+                                "props": {
+                                    "className": "p-10 max-w-5xl mx-auto mt-10 bg-white/5 backdrop-blur-xl rounded-3xl border border-white/10 shadow-[0_0_40px_rgba(168,85,247,0.2)]",
+                                    "style": {}
+                                }
+                            },
+                            {
+                                "id": "demo-title",
+                                "type": "text",
+                                "props": {
+                                    "content": "No API Key Provided",
+                                    "className": "text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-violet-500 mb-6",
+                                    "style": {"WebkitBackgroundClip": "text"}
+                                }
+                            },
+                            {
+                                "id": "demo-subtitle",
+                                "type": "text",
+                                "props": {
+                                    "content": "The platform is currently running in DEMO_MODE. Please disable DEMO_MODE in the backend/.env file and provide a Gemini API key to experience the full AI-generated UI architecture.",
+                                    "className": "text-lg text-gray-400 leading-relaxed",
+                                    "style": {}
+                                }
+                            }
+                        ],
+                        "edges": [
+                            {"source": "demo-nav", "target": "demo-logo", "type": "child"},
+                            {"source": "demo-main", "target": "demo-title", "type": "child"},
+                            {"source": "demo-main", "target": "demo-subtitle", "type": "child"}
+                        ]
+                    }
+                ],
+                "user_flows": ["User runs demo mode -> User sees fallback UI -> User configures API key"]
+            }
         else:
             result = self.llm.generate_json(
                 system=UIUX_AGENT_SYSTEM_PROMPT,
