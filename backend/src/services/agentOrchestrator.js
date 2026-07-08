@@ -596,6 +596,7 @@ class AgentOrchestrator {
     // Get requirements and user stories for context
     let requirements = null;
     let userStories = null;
+    let solutionArchitecture = null;
     
     try {
       const reqs = await query('SELECT * FROM requirements WHERE project_id = $1', [projectId]);
@@ -617,6 +618,20 @@ class AgentOrchestrator {
           description: s.description
         })) || []
       };
+      
+      try {
+        const arch = await query("SELECT content FROM generated_artifacts WHERE project_id = $1 AND artifact_type = 'solution_architecture' ORDER BY created_at DESC LIMIT 1", [projectId]);
+        if (arch.rows && arch.rows.length > 0) {
+          try {
+            // It might be stored as stringified JSON or plain text
+            solutionArchitecture = typeof arch.rows[0].content === 'string' ? JSON.parse(arch.rows[0].content) : arch.rows[0].content;
+          } catch (e) {
+            solutionArchitecture = arch.rows[0].content;
+          }
+        }
+      } catch (archError) {
+        console.log('UI/UX Agent: Could not fetch solution architecture');
+      }
     } catch (dbError) {
       console.log('UI/UX Agent: Could not fetch context, using project description only');
     }
@@ -626,7 +641,8 @@ class AgentOrchestrator {
       const response = await axios.post(`${PYTHON_AGENT_BASE_URL}/agents/uiux`, {
         project_description: project.description || project.name,
         requirements,
-        user_stories: userStories
+        user_stories: userStories,
+        solution_architecture: solutionArchitecture
       });
 
       const output = response.data;
@@ -653,11 +669,36 @@ class AgentOrchestrator {
       console.error('UI/UX Agent Python call failed:', error.message);
       // Fallback: return empty structure
       const fallback = {
-        screens: ['Dashboard', 'Project Workspace', 'Artifact Review', 'Approval Center'],
-        userFlows: ['Create project → generate artifacts → review → approve → build', 'Open workspace → inspect artifact → export'],
-        wireframes: ['Responsive application shell with persistent navigation', 'Workspace header, metrics, tabs, and artifact detail cards'],
-        componentRecommendations: ['Card', 'StatusBadge', 'ProgressBar', 'ApprovalModal'],
-        uxRecommendations: ['Keep agent progress visible', 'Preserve context between workspaces', 'Use clear empty and loading states']
+        screens: [
+          {name: 'Dashboard', purpose: 'Main overview', components: ['Header', 'Sidebar', 'KPI Cards', 'Chart']},
+          {name: 'Project Workspace', purpose: 'Manage project', components: ['Tabs', 'Editor']},
+          {name: 'Artifact Review', purpose: 'Review generated code', components: ['CodeViewer', 'Comments']},
+          {name: 'Approval Center', purpose: 'Approve stages', components: ['Table', 'StatusBadge']}
+        ],
+        userFlows: [
+          {name: 'Main Flow', steps: ['Create project', 'generate artifacts', 'review', 'approve', 'build'], screens: ['Dashboard', 'Project Workspace', 'Artifact Review', 'Approval Center']},
+          {name: 'Secondary Flow', steps: ['Open workspace', 'inspect artifact', 'export'], screens: ['Project Workspace']}
+        ],
+        wireframes: [
+          {screen: 'Dashboard', layout: 'Sidebar left, content right', description: 'Responsive application shell with persistent navigation'},
+          {screen: 'Project Workspace', layout: 'Tabs top, editor below', description: 'Workspace header, metrics, tabs, and artifact detail cards'}
+        ],
+        componentRecommendations: [
+          {name: 'Card', type: 'Container', library: 'Custom', rationale: 'Content grouping'},
+          {name: 'StatusBadge', type: 'Indicator', library: 'Custom', rationale: 'Show states'},
+          {name: 'ProgressBar', type: 'Feedback', library: 'Custom', rationale: 'Agent progress'},
+          {name: 'ApprovalModal', type: 'Overlay', library: 'Custom', rationale: 'Confirm actions'}
+        ],
+        uxRecommendations: ['Keep agent progress visible', 'Preserve context between workspaces', 'Use clear empty and loading states'],
+        designSystem: {
+          typography: { fontFamily: "Inter", headingFont: "Inter", scale: {}, rationale: "" },
+          spacing: { baseUnit: "8px", scale: [], rationale: "" },
+          colorPalette: { primary: [], neutral: [], semantic: [], rationale: "" },
+          components: [],
+          responsiveBreakpoints: [],
+          accessibility: [],
+          designPrinciples: []
+        }
       };
       
       await query(
@@ -748,7 +789,7 @@ class AgentOrchestrator {
     let security = null;
 
     try {
-      const artifacts = await query('SELECT artifact_type, content FROM generated_artifacts WHERE project_id = $1', [projectId]);
+      const artifacts = await query('SELECT artifact_type, content FROM generated_artifacts WHERE project_id = $1 ORDER BY created_at ASC', [projectId]);
       artifacts.rows?.forEach(art => {
         try {
           const parsed = parseJsonValue(art.content, null);

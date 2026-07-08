@@ -2057,6 +2057,7 @@ class UIUXRequest(_BaseModel):
     project_description: str
     requirements: dict | None = None
     user_stories: dict | None = None
+    solution_architecture: dict | None = None
 
 
 class SecurityRequest(_BaseModel):
@@ -2088,11 +2089,87 @@ async def run_uiux_agent(
         result = agent.run(
             project_description=request.project_description,
             requirements=request.requirements,
-            user_stories=request.user_stories
+            user_stories=request.user_stories,
+            solution_architecture=request.solution_architecture
         )
         return result.model_dump()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"UI/UX Agent error: {str(e)}")
+
+class GenerateRequest(_BaseModel):
+    messages: list
+    current_spec: dict | None = None
+    project_id: int | None = None
+
+@router.post("/api/generate", tags=["agents"])
+async def generate_ui_chat(request: GenerateRequest, db: Session = Depends(get_db)):
+    try:
+        from google import genai
+        from google.genai import types
+        import os
+        import json
+        
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="GEMINI_API_KEY not set")
+            
+        client = genai.Client(api_key=api_key)
+        
+        # Inject the current application specification so the AI modifies it instead of creating a new app
+        current_context = ""
+        if request.current_spec:
+            current_context = f"\nCURRENT APPLICATION SPECIFICATION TO MODIFY:\n{json.dumps(request.current_spec)}\n\nDo NOT create a new application. You must strictly modify the CURRENT APPLICATION SPECIFICATION based on the user's request. Keep everything else intact.\n"
+
+        SYSTEM_PROMPT = f"""You are an elite Senior UI/UX Architect designing ultra-premium, cutting-edge Web3/SaaS applications.
+You must output a highly detailed Design Specification containing JAW-DROPPING, HIGH-FIDELITY visual mockups.
+You must return the EXACT JSON structure as defined below:
+
+{{
+  "project_name": "string",
+  "design_system": {{ "colors": {{ "primary": "hex", "background": "hex", "text": "hex" }} }},
+  "user_flows": ["string"],
+  "pages": [
+    {{
+      "page_name": "string",
+      "path": "string",
+      "component_tree": {{
+        "id": "string", "type": "string", "label": "string", "props": {{ "className": "string", "style": {{}} }}, "children": []
+      }}
+    }}
+  ]
+}}
+
+CRITICAL AESTHETIC GUIDELINES:
+1. COPYWRITING: No placeholder text. Update the 'label' field to change text.
+2. CONVERSATIONAL EDITING: You MUST return the ENTIRE JSON structure again, including all unmodified pages. Do not omit pages.
+3. CSS COMPILATION LIMIT: Tailwind classes might be purged at runtime. For ALL visual modifications (colors, borders, rounded corners, padding), you MUST inject standard CSS into the inline 'style' object (e.g. "style": {{"borderRadius": "9999px", "backgroundColor": "#ff0000", "boxShadow": "0 25px 50px -12px rgba(168, 85, 247, 0.25)"}}). Do NOT rely solely on changing className!
+4. PREMIUM VISUAL EXCELLENCE: Apply stunning aesthetics to your edits. Use glassmorphism, vibrant accent gradients, and deep layered shadows. Never output simple flat designs.
+{current_context}"""
+        contents = []
+        for msg in request.messages:
+            contents.append(types.Content(role=msg.get("role"), parts=[types.Part.from_text(text=msg.get("content"))]))
+            
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                temperature=0.7,
+            ),
+        )
+        text = response.text.strip()
+        if text.startswith("```json"): text = text[7:]
+        elif text.startswith("```"): text = text[3:]
+        if text.endswith("```"): text = text[:-3]
+        parsed_data = json.loads(text.strip())
+        if request.project_id:
+            _save_artifact(db, request.project_id, "uiux_design", json.dumps(parsed_data))
+            db.commit()
+        return parsed_data
+    except Exception as e:
+        print(f"Error generating UI: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/agents/security", tags=["agents"])
