@@ -7,6 +7,9 @@ const {
   emitArtifactGenerated,
   emitApprovalRequested,
   emitProjectProgress,
+  emitCodeGenStarted,
+  emitCodeChunk,
+  emitCodeGenCompleted,
 } = require('../websocket/progressSocket');
 
 const PYTHON_AGENT_BASE_URL = process.env.PYTHON_AGENT_BASE_URL || 'http://localhost:8000';
@@ -153,7 +156,38 @@ class AgentOrchestrator {
       const blocked = await this._isBlockedByPendingReview(projectId, execution.execution_order);
       if (blocked) return { status: 'paused', reason: 'pending_approval' };
 
-      await this.runAgent(execution.id, projectId, userId);
+      // Style-selection gate: frontend generation must not start until the
+      // user has picked one of the UI/UX Agent's style directions. Mirrors
+      // the human-review pause pattern above (pending approvals row +
+      // 'paused' project status) so it reuses the same resume path.
+      if (execution.agent_type === 'frontend') {
+        const hasStyle = await this._hasSelectedUiStyle(projectId);
+        if (!hasStyle) {
+          await this._ensureStyleSelectionApproval(projectId);
+          await query(
+            `UPDATE projects SET status = 'paused', updated_at = NOW() WHERE id = $1`,
+            [projectId]
+          );
+          await this.updateProjectProgress(projectId);
+          return { status: 'paused', reason: 'style-selection' };
+        }
+      }
+
+      const pipelineDef = AGENT_PIPELINE.find((a) => a.type === execution.agent_type);
+      try {
+        await this.runAgent(execution.id, projectId, userId);
+      } catch (err) {
+        // Optional stages (e.g. Presentation Video) must never halt the
+        // pipeline — runAgent has already marked this row 'failed' with
+        // error_message set; just move on to the next stage. Required
+        // stages keep today's behavior: the error propagates and stops
+        // the pipeline here.
+        if (pipelineDef && pipelineDef.required === false) {
+          console.error(`[pipeline] optional agent ${execution.agent_type} failed for project ${projectId}, continuing:`, err.message);
+          continue;
+        }
+        throw err;
+      }
 
       if (isReview) {
         await query(
@@ -176,6 +210,68 @@ class AgentOrchestrator {
        WHERE id = $1`,
       [projectId]
     );
+    return this.runPipeline(projectId, userId);
+  }
+
+  // Checkpoint recovery — retries only the failed stage (and everything
+  // after it) rather than the whole pipeline. runPipeline's own loop
+  // already skips 'completed' rows, so resetting just the failed row to
+  // 'idle' is enough for it to pick back up in the right place.
+  async resumePipeline(projectId, userId) {
+    const failed = await query(
+      `SELECT id FROM agent_executions
+       WHERE project_id = $1 AND status = 'failed'
+       ORDER BY execution_order ASC, id ASC LIMIT 1`,
+      [projectId]
+    );
+    if (!failed.rows.length) {
+      // Nothing failed — just make sure the pipeline isn't stuck paused
+      // and let runPipeline figure out what (if anything) is left to do.
+      return this.resumePipelineAfterApproval(projectId, userId);
+    }
+
+    await query(
+      `UPDATE agent_executions
+       SET status = 'idle', error_message = NULL, updated_at = NOW()
+       WHERE id = $1`,
+      [failed.rows[0].id]
+    );
+    await query(
+      `UPDATE projects
+       SET status = CASE WHEN status IN ('paused', 'failed') THEN 'active' ELSE status END, updated_at = NOW()
+       WHERE id = $1`,
+      [projectId]
+    );
+
+    return this.runPipeline(projectId, userId);
+  }
+
+  // Full restart — every stage re-runs from Memory (execution_order 1),
+  // regardless of what previously completed.
+  async restartPipeline(projectId, userId) {
+    await query(
+      `UPDATE agent_executions
+       SET status = 'idle', progress = 0, error_message = NULL,
+           output_data = NULL, started_at = NULL, completed_at = NULL, updated_at = NOW()
+       WHERE project_id = $1`,
+      [projectId]
+    );
+    // Any pending gate (human review or style-selection) from the previous
+    // run is stale once every stage resets to idle — leaving it pending
+    // would incorrectly block re-running the stage it was gating (e.g. an
+    // old style-selection approval pointing at style options from the
+    // superseded run). Clear it so the fresh run creates its own gate when
+    // it reaches that stage again.
+    await query(
+      `UPDATE approvals SET status = 'rejected', comment = 'Superseded by pipeline restart', decided_at = NOW()
+       WHERE project_id = $1 AND status = 'pending'`,
+      [projectId]
+    );
+    await query(
+      `UPDATE projects SET status = 'active', progress = 0, updated_at = NOW() WHERE id = $1`,
+      [projectId]
+    );
+
     return this.runPipeline(projectId, userId);
   }
 
@@ -423,17 +519,159 @@ class AgentOrchestrator {
     return { output: parsed, tokens: aiResult.tokens, cost: aiResult.cost, durationMs: Date.now() - start };
   }
 
+  // Shared by runFrontendAgent/runBackendAgent — pulls whatever the
+  // Architect agent already decided for this project (if it ran), so
+  // generation follows the project's own architecture instead of a
+  // hardcoded framework. Generic across any project domain.
+  async _fetchArchitectureContext(projectId, label) {
+    try {
+      const arch = await query(
+        'SELECT * FROM architecture_proposals WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1',
+        [projectId]
+      );
+      if (!arch.rows?.length) return null;
+      return {
+        pattern: arch.rows[0].pattern,
+        apiStyle: arch.rows[0].api_style,
+        techStack: parseJsonValue(arch.rows[0].tech_stack, {}),
+        services: parseJsonValue(arch.rows[0].services, []),
+      };
+    } catch (dbError) {
+      console.log(`${label}: Could not fetch architecture context`);
+      return null;
+    }
+  }
+
+  async _fetchSelectedUiStyle(projectId) {
+    try {
+      const row = await query(
+        `SELECT value FROM project_memory WHERE project_id = $1 AND key = 'selected_ui_style' AND namespace = 'design' LIMIT 1`,
+        [projectId]
+      );
+      return row.rows?.length ? parseJsonValue(row.rows[0].value, null) : null;
+    } catch (dbError) {
+      console.log('Frontend Agent: Could not fetch selected UI style');
+      return null;
+    }
+  }
+
+  async _hasSelectedUiStyle(projectId) {
+    const style = await this._fetchSelectedUiStyle(projectId);
+    return !!style;
+  }
+
+  // Creates (once) the pending approval that gates frontend generation on a
+  // UI style pick. Reuses the styleOptions the UI/UX Agent already produced
+  // (persisted as part of the 'uiux_design' artifact) — no re-generation.
+  async _ensureStyleSelectionApproval(projectId) {
+    const existing = await query(
+      `SELECT id FROM approvals WHERE project_id = $1 AND type = 'style-selection' AND status = 'pending' LIMIT 1`,
+      [projectId]
+    );
+    if (existing.rows.length) return existing.rows[0].id;
+
+    let styleOptions = [];
+    try {
+      const artifact = await query(
+        `SELECT content FROM generated_artifacts WHERE project_id = $1 AND artifact_type = 'uiux_design' ORDER BY created_at DESC LIMIT 1`,
+        [projectId]
+      );
+      if (artifact.rows.length) {
+        const parsed = parseJsonValue(artifact.rows[0].content, {});
+        styleOptions = parsed.styleOptions || [];
+      }
+    } catch (dbError) {
+      console.log('Style selection gate: could not load UI/UX styleOptions');
+    }
+
+    const inserted = await query(
+      `INSERT INTO approvals (project_id, type, title, description, status, risk_level)
+       VALUES ($1, 'style-selection', 'Choose a UI Style Direction', $2, 'pending', 'low')
+       RETURNING id, type, title`,
+      [projectId, JSON.stringify({ styleOptions })]
+    );
+    if (inserted.rows?.length) {
+      emitApprovalRequested(projectId, inserted.rows[0].id, inserted.rows[0].type, inserted.rows[0].title);
+    }
+    return inserted.rows[0]?.id;
+  }
+
+  // Task 2b — "live" code generation for the Development Studio: the file
+  // content is already fully generated by the time this runs (see
+  // runFrontendAgent/runBackendAgent below); this just re-broadcasts it
+  // over the existing per-project WebSocket room in small, paced chunks so
+  // the UI can render it as if it were streaming in, the way an AI coding
+  // assistant would. Never throws — a streaming hiccup must never fail
+  // code generation itself.
+  async _streamGeneratedFiles(projectId, agentType, files) {
+    try {
+      const list = files || [];
+      emitCodeGenStarted(projectId, agentType, list.length);
+
+      const LINES_PER_CHUNK = 3;
+      const CHUNK_DELAY_MS = 35;
+      const MAX_MS_PER_FILE = 4000;
+      let totalLines = 0;
+
+      for (const file of list) {
+        const lines = String(file.content || '').split('\n');
+        totalLines += lines.length;
+        const fileStart = Date.now();
+
+        for (let i = 0; i < lines.length; i += LINES_PER_CHUNK) {
+          const overBudget = Date.now() - fileStart > MAX_MS_PER_FILE;
+          const chunkLines = overBudget ? lines.slice(i) : lines.slice(i, i + LINES_PER_CHUNK);
+          const isFirstChunk = i === 0;
+          const isLastChunk = overBudget || i + LINES_PER_CHUNK >= lines.length;
+
+          emitCodeChunk(
+            projectId, agentType, file.path, file.language || 'text',
+            chunkLines.join('\n'), isFirstChunk, isLastChunk
+          );
+
+          if (isLastChunk) break;
+          await new Promise((resolve) => setTimeout(resolve, CHUNK_DELAY_MS));
+        }
+      }
+
+      emitCodeGenCompleted(projectId, agentType, list.length, totalLines);
+    } catch (err) {
+      console.error(`[stream] code streaming failed for project ${projectId} (${agentType}):`, err.message);
+    }
+  }
+
   async runFrontendAgent(project, projectId, userId, start) {
-    const prompt = `Generate React frontend code structure for: ${project.description}\n\nReturn JSON with: files (array with path, name, language, lines, content snippet), components (array of names), routes (array), linesOfCode (number).`;
+    const architecture = await this._fetchArchitectureContext(projectId, 'Frontend Agent');
+    const selectedStyle = await this._fetchSelectedUiStyle(projectId);
+
+    const architectureContext = architecture
+      ? `The Solution Architect has already decided the following for this project — follow it where it applies to the frontend:\n${JSON.stringify(architecture, null, 2)}`
+      : 'No prior architecture decision is available for this project — use your own best judgement below.';
+    const styleContext = selectedStyle
+      ? `\n\nThe user selected this UI style direction — match its color palette, typography, spacing, and button style exactly:\n${JSON.stringify(selectedStyle, null, 2)}`
+      : '';
+
+    const prompt = `Generate a complete, realistic frontend codebase for this project:\n\n"${project.description}"\n\n${architectureContext}${styleContext}\n\n` +
+      `Use React with functional components and hooks (this platform's standard frontend stack) unless the architecture above specifies a different frontend framework — then follow the architecture.\n\n` +
+      `Requirements for the generated code:\n` +
+      `- A sane folder structure: components/, pages (or views)/, hooks/, a services or api/ layer, and one clear entry component — sized to the actual features this project needs.\n` +
+      `- Multiple small, reusable components with clear props and a single responsibility each — never one monolithic file.\n` +
+      `- Real client-side state management (useState/useReducer/context as appropriate) — no static or mock data.\n` +
+      `- Input validation and user-facing error handling on every interactive form/control.\n` +
+      `- A responsive, mobile-first layout and modern, polished styling, applied consistently across files.\n` +
+      `- Every file's "content" field must be the COMPLETE, runnable file contents — never a snippet, a comment-only stub, "// TODO", or lorem ipsum placeholder text.\n` +
+      `- List enough files (components/pages/hooks/services) to genuinely cover the project's own described features — a trivial 1-2 file dump is not acceptable.\n\n` +
+      `Return JSON with: framework (string), components (array of names), routes (array), ` +
+      `files (array of {path, name, language, lines, content}) — content is the full file text, not a snippet.`;
 
     const aiResult = await aiService.complete(prompt, {
-      systemPrompt: 'You are an expert React/TypeScript developer. Generate production-ready component code. Return valid JSON only.',
+      systemPrompt: 'You are a senior frontend engineer. You write real, working, production-quality code for whatever application is described to you — never placeholders, TODOs, or lorem ipsum. Follow any architecture or style decisions given to you exactly. Return valid JSON only.',
       userId,
     });
 
     let parsed;
     try { parsed = JSON.parse(aiResult.text); } catch { parsed = { files: [], components: [], routes: [], linesOfCode: 0 }; }
-    parsed.framework = parsed.framework || 'React + TypeScript';
+    parsed.framework = parsed.framework || architecture?.techStack?.frontend || 'React + TypeScript';
     parsed.modules = parsed.modules || parsed.components || [];
     parsed.implementation = parsed.implementation || `${parsed.framework} application with ${(parsed.files || []).length} generated files`;
 
@@ -441,7 +679,7 @@ class AgentOrchestrator {
       await query(
         `INSERT INTO generated_files (project_id, file_path, file_name, file_type, content, lines_of_code, language)
          VALUES ($1, $2, $3, 'frontend', $4, $5, $6)`,
-        [projectId, file.path, file.name, file.content || '', file.lines || 0, file.language || 'typescript']
+        [projectId, file.path, file.name, file.content || '', file.lines || (file.content ? file.content.split('\n').length : 0), file.language || 'typescript']
       );
     }
 
@@ -450,32 +688,70 @@ class AgentOrchestrator {
       componentCount: parsed.components?.length || 0,
     });
 
+    await this._streamGeneratedFiles(projectId, 'frontend', parsed.files || []);
+
     return { output: parsed, tokens: aiResult.tokens, cost: aiResult.cost, durationMs: Date.now() - start };
   }
 
   async runBackendAgent(project, projectId, userId, start) {
-    const prompt = `Generate Node.js/Express backend API structure for: ${project.description}\n\nReturn JSON with: framework, endpoints (array with method, path, description), middleware (array), swaggerUrl, linesOfCode.`;
+    const architecture = await this._fetchArchitectureContext(projectId, 'Backend Agent');
+
+    const architectureContext = architecture
+      ? `The Solution Architect has already decided the following for this project — follow it:\n${JSON.stringify(architecture, null, 2)}`
+      : 'No prior architecture decision is available for this project — use your own best judgement below.';
+
+    const prompt = `Generate a complete, realistic backend codebase for this project:\n\n"${project.description}"\n\n${architectureContext}\n\n` +
+      `Unless the architecture above specifies a different backend framework, default to FastAPI (Python 3.11) — this platform's standard backend stack — then follow the architecture instead.\n\n` +
+      `Requirements for the generated code:\n` +
+      `- Clean architecture with separate routers, services, models, and schemas in their own files (e.g. app/routers, app/services, app/models, app/schemas for FastAPI, or the equivalent layering for whatever framework the architecture specifies).\n` +
+      `- Real CRUD/business endpoints derived from the project description (not generic placeholders) with request/response validation.\n` +
+      `- Structured logging (the framework's standard logging facility, not print statements) and centralized error handling with meaningful HTTP status codes.\n` +
+      `- A config module for settings and a dependency manifest file (e.g. requirements.txt) appropriate to the chosen framework.\n` +
+      `- Every file's "content" field must be the COMPLETE, runnable file contents — never a snippet, a comment-only stub, "// TODO", or lorem ipsum placeholder text.\n` +
+      `- List enough files (routers/services/models/schemas/config) to genuinely cover the project's own described features — a trivial 1-2 file dump is not acceptable.\n\n` +
+      `Return JSON with: framework (string), endpoints (array of {method, path, description}), middleware (array of strings), ` +
+      `files (array of {path, name, language, lines, content}) — content is the full file text, not a snippet.`;
 
     const aiResult = await aiService.complete(prompt, {
-      systemPrompt: 'You are an expert Node.js backend developer. Design RESTful APIs. Return valid JSON only.',
+      systemPrompt: 'You are a senior backend engineer. You write real, working, production-quality code for whatever application is described to you — never placeholders, TODOs, or lorem ipsum. Follow any architecture decisions given to you exactly. Return valid JSON only.',
       userId,
     });
 
     let parsed;
-    try { parsed = JSON.parse(aiResult.text); } catch { parsed = { framework: 'Express', endpoints: [], middleware: [], linesOfCode: 0 }; }
+    try { parsed = JSON.parse(aiResult.text); } catch { parsed = { framework: architecture?.techStack?.backend || 'FastAPI', endpoints: [], middleware: [], files: [] }; }
+
+    const framework = parsed.framework || architecture?.techStack?.backend || 'FastAPI';
+    const inferredLanguage = /fastapi|django|flask|python/i.test(framework) ? 'python'
+      : /spring|java\b/i.test(framework) ? 'java'
+      : /\.net|c#/i.test(framework) ? 'csharp'
+      : 'javascript';
+
+    const files = (parsed.files && parsed.files.length ? parsed.files : (parsed.endpoints || []).map((endpoint, index) => ({
+      path: `src/routes/route-${index + 1}.js`,
+      name: `${String(endpoint.method || 'get').toLowerCase()}-${index + 1}.js`,
+      language: inferredLanguage,
+      content: `${endpoint.method || 'GET'} ${endpoint.path || '/'} — ${endpoint.description || ''}`,
+    }))).map((file) => ({ ...file, language: file.language || inferredLanguage }));
 
     parsed = {
       ...parsed,
+      framework,
       modules: parsed.modules || parsed.middleware || [],
-      implementation: parsed.implementation || `${parsed.framework || 'Express'} API with ${(parsed.endpoints || []).length} endpoints`,
-      files: parsed.files || (parsed.endpoints || []).map((endpoint, index) => ({
-        path: `src/routes/route-${index + 1}.js`,
-        name: `${String(endpoint.method || 'get').toLowerCase()}-${index + 1}.js`,
-        language: 'javascript',
-        content: `${endpoint.method || 'GET'} ${endpoint.path || '/'} — ${endpoint.description || ''}`,
-      })),
+      implementation: parsed.implementation || `${framework} API with ${(parsed.endpoints || []).length} endpoints`,
+      files,
     };
-    await this.persistArtifact(projectId, 'backend_code', parsed, { endpointCount: parsed.endpoints?.length || 0 });
+
+    for (const file of files) {
+      await query(
+        `INSERT INTO generated_files (project_id, file_path, file_name, file_type, content, lines_of_code, language)
+         VALUES ($1, $2, $3, 'backend', $4, $5, $6)`,
+        [projectId, file.path, file.name, file.content || '', file.lines || (file.content ? file.content.split('\n').length : 0), file.language || inferredLanguage]
+      );
+    }
+
+    await this.persistArtifact(projectId, 'backend_code', parsed, { endpointCount: parsed.endpoints?.length || 0, fileCount: files.length });
+
+    await this._streamGeneratedFiles(projectId, 'backend', files);
 
     return { output: parsed, tokens: aiResult.tokens, cost: aiResult.cost, durationMs: Date.now() - start };
   }

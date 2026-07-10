@@ -222,19 +222,27 @@ class LLMService:
         *,
         role: str | None = None,
         timeout: int | None = None,
-        provider_lock: str | None = None,
+        provider_lock: str | tuple[str, ...] | None = None,
     ) -> None:
         self.db = db
         self.project_id = project_id
         self.role = role
         self.timeout = timeout
-        # When set (e.g. "azure_openai"), _produce_text only ever tries a
-        # BYOK/default config matching this provider and never falls through
-        # to Groq/OpenAI/Ollama — used by the presentation pipeline, which
-        # must stay Azure-only end to end. Every other caller leaves this
-        # None and keeps today's full BYOK -> Azure -> Groq -> OpenAI ->
-        # Ollama resolution, unchanged.
+        # When set (e.g. "azure_openai", or an ordered chain like
+        # ("azure_openai", "groq")), _produce_text only ever tries
+        # BYOK/default configs matching one of these providers, tried in
+        # order, before falling through to Ollama — used by the
+        # presentation pipeline, which must stay on its own curated
+        # provider chain (Azure primary, Groq fallback) rather than picking
+        # up whatever BYOK/default the rest of the platform would otherwise
+        # prefer (OpenAI, etc). A bare string is normalized to a
+        # single-provider chain for backward compatibility. Every other
+        # caller leaves this None and keeps today's full BYOK -> Azure ->
+        # Groq -> OpenAI -> Ollama resolution, unchanged.
         self.provider_lock = provider_lock
+        self._lock_chain: tuple[str, ...] = (
+            (provider_lock,) if isinstance(provider_lock, str) else tuple(provider_lock or ())
+        )
         self._last_provider = "ollama"
 
     # -- resolution -----------------------------------------------------
@@ -287,10 +295,12 @@ class LLMService:
         context-window budget — never for business-logic branching, so
         callers still never learn *which* provider actually serves the
         request."""
-        if self.provider_lock:
+        if self._lock_chain:
             byok = self._resolve_project_byok()
-            locked_byok = byok is not None and byok.provider == self.provider_lock
-            return locked_byok or self._resolve_locked_default() is not None
+            locked_byok = byok is not None and byok.provider in self._lock_chain
+            return locked_byok or any(
+                self._resolve_locked_default(lock) is not None for lock in self._lock_chain
+            )
         return (
             self._resolve_project_byok() is not None
             or self._resolve_default_azure() is not None
@@ -298,12 +308,42 @@ class LLMService:
             or self._resolve_default_openai() is not None
         )
 
-    def _resolve_locked_default(self) -> CloudProviderConfig | None:
-        """The deployment-default resolver matching self.provider_lock, or
-        None if the lock doesn't correspond to one of the default tiers
-        (only "azure_openai" is wired today)."""
-        if self.provider_lock == "azure_openai":
+    def has_generous_context_path(self) -> bool:
+        """Like has_cloud_path(), but deliberately EXCLUDES Groq: Groq's
+        free-tier budget is a strict tokens-PER-MINUTE cap (e.g. 12000 TPM on
+        llama-3.3-70b-versatile) that's far smaller than a genuine GPT-4-class
+        context window despite Groq being a "cloud" provider by every other
+        measure. Content sized on the assumption that "any cloud path exists
+        -> don't truncate" comfortably blows straight through that TPM limit
+        as an immediate HTTP 413, not a retryable 429 — so callers that skip
+        truncation whenever *a* cloud path exists (has_cloud_path) end up
+        oversizing the prompt specifically when Groq is what actually serves
+        it. Used by the presentation pipeline, which produces the largest
+        prompts in the platform (full multi-artifact context) and hit this
+        exact failure. Azure OpenAI and OpenAI keep the "don't truncate"
+        treatment; Groq gets the same conservative cap the Ollama fallback
+        already uses."""
+        generous = ("azure_openai", "openai")
+        if self._lock_chain:
+            byok = self._resolve_project_byok()
+            locked_byok = byok is not None and byok.provider in self._lock_chain and byok.provider in generous
+            return locked_byok or any(
+                lock in generous and self._resolve_locked_default(lock) is not None
+                for lock in self._lock_chain
+            )
+        byok = self._resolve_project_byok()
+        if byok is not None and byok.provider in generous:
+            return True
+        return self._resolve_default_azure() is not None or self._resolve_default_openai() is not None
+
+    def _resolve_locked_default(self, lock: str) -> CloudProviderConfig | None:
+        """The deployment-default resolver matching one entry of the lock
+        chain, or None if that entry doesn't correspond to one of the
+        default tiers ("azure_openai" and "groq" are wired today)."""
+        if lock == "azure_openai":
             return self._resolve_default_azure()
+        if lock == "groq":
+            return self._resolve_default_groq()
         return None
 
     def last_provider_used(self) -> str:
@@ -480,10 +520,12 @@ class LLMService:
     # -- one text-producing attempt, tried in provider order, never raises
     # unless provider_lock is set and no matching provider is configured --
     def _produce_text(self, system: str, prompt: str, *, json_mode: bool, temperature: float) -> str:
-        if self.provider_lock:
+        if self._lock_chain:
             byok = self._resolve_project_byok()
-            candidates = [byok if byok is not None and byok.provider == self.provider_lock else None,
-                          self._resolve_locked_default()]
+            candidates: list[CloudProviderConfig | None] = []
+            for lock in self._lock_chain:
+                candidates.append(byok if byok is not None and byok.provider == lock else None)
+                candidates.append(self._resolve_locked_default(lock))
         else:
             candidates = [self._resolve_project_byok(), self._resolve_default_azure(),
                           self._resolve_default_groq(), self._resolve_default_openai()]
@@ -512,12 +554,12 @@ class LLMService:
                     logger.warning("LLMService: provider %s failed (%s) — falling back", cfg.provider, exc)
                     break
 
-        if self.provider_lock:
-            raise ProviderUnavailableError(
-                f"{self.provider_lock} is not configured (or failed) and this call is locked to "
-                f"{self.provider_lock} only — no Groq/OpenAI/Ollama fallback is permitted here."
-            )
-
+        # Every candidate in the resolution order above — including a
+        # locked chain such as ("azure_openai", "groq") — is now either
+        # unconfigured or has failed. Fall through to the local Ollama
+        # fallback exactly like the unlocked path does: a cloud provider
+        # outage must never crash the calling pipeline (see Presentation
+        # Video Agent, which relies on this for Azure -> Groq -> Ollama).
         client = self._ollama_client()
         self._last_provider = "ollama"
         logger.info("LLMService: request served by ollama (role=%s)", self.role)

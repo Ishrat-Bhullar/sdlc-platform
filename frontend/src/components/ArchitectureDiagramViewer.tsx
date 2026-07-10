@@ -68,9 +68,17 @@ export function sanitizeMermaidSource(source: string): string {
       const [, indent, rawA, label, rawB] = m;
       const a = rawA.trim();
       const b = rawB.trim();
-      if (!a.includes(' ') && !b.includes(' ')) return line;
+      const hadTrailingGt = label !== undefined && /\|>\s*\S/.test(line);
+      // Even when neither node name needs quoting, a stray `>` right after
+      // the label's closing `|` (e.g. `A-->|label|>B`) is still invalid
+      // Mermaid syntax and must be stripped — the multi-word-name rewrite
+      // below already does this as a side effect, but bail out into that
+      // path too when only the `|>` needs fixing.
+      if (!a.includes(' ') && !b.includes(' ') && !hadTrailingGt) return line;
       const edge = label !== undefined ? `-->|${label.trim()}|` : '-->';
-      return `${indent}${safeId(a)}["${a}"] ${edge} ${safeId(b)}["${b}"]`;
+      const nodeA = a.includes(' ') ? `${safeId(a)}["${a}"]` : a;
+      const nodeB = b.includes(' ') ? `${safeId(b)}["${b}"]` : b;
+      return `${indent}${nodeA} ${edge} ${nodeB}`;
     })
     .join('\n');
 }

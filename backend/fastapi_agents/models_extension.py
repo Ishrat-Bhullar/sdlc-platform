@@ -351,6 +351,11 @@ class ApprovalOut(BaseModel):
 class ApprovalDecisionRequest(BaseModel):
     decision: str         # approved | rejected | published
     comments: str | None = None
+    # Only used for artifact_type == "ui_style_selection" approvals — the
+    # style card the user picked (name/colorPalette/typography/etc, same
+    # shape as one entry of the UI/UX Agent's styleOptions). Persisted as a
+    # new GeneratedArtifact so the Frontend Agent's context can pick it up.
+    selection: dict | None = None
 
 
 class ApprovalDecisionOut(BaseModel):

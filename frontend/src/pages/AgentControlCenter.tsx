@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Bot,
@@ -12,6 +12,10 @@ import {
   Settings,
   ChevronRight,
   CheckCircle2,
+  XCircle,
+  Loader2,
+  RotateCcw,
+  PlayCircle,
   FileSearch,
   Briefcase,
   Building2,
@@ -32,6 +36,153 @@ import {
 import { Card, StatusBadge, ProgressBar, PreviewBadge } from '../components/ui/Card';
 import { mockAgents } from '../data/mockData';
 import type { Agent } from '../types';
+import { apiRequest } from '../lib/api';
+import { getSelectedProjectId } from '../lib/projectContext';
+import { usePipelineUpdates } from '../hooks/usePipelineUpdates';
+
+// Matches GET /projects/{id}/agent-runs exactly (backend/fastapi_agents/main_extension.py) —
+// RunStatus is "pending" | "running" | "completed" | "failed"; agent_name is the
+// human-readable AgentName enum value (e.g. "Frontend Agent"), already in pipeline order.
+interface AgentRunStatus {
+  id: number;
+  project_id: number;
+  agent_name: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  start_time: string | null;
+  end_time: string | null;
+  output_url: string | null;
+}
+
+function stageIcon(status: AgentRunStatus['status']) {
+  if (status === 'completed') return <CheckCircle2 className="h-3.5 w-3.5 text-status-success" />;
+  if (status === 'failed') return <XCircle className="h-3.5 w-3.5 text-status-error" />;
+  if (status === 'running') return <Loader2 className="h-3.5 w-3.5 text-status-info animate-spin" />;
+  return <Clock className="h-3.5 w-3.5 text-text-muted" />;
+}
+
+function PipelineCheckpointsCard() {
+  const [projectId] = useState(() => getSelectedProjectId());
+  const [runs, setRuns] = useState<AgentRunStatus[] | null>(null);
+  const [actionState, setActionState] = useState<'idle' | 'resuming' | 'restarting'>('idle');
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const data = await apiRequest<AgentRunStatus[]>(`/projects/${projectId}/agent-runs`);
+      setRuns(data);
+    } catch {
+      setRuns(null);
+    }
+  }, [projectId]);
+
+  useEffect(() => { load(); }, [load]);
+  usePipelineUpdates(projectId, () => { load(); });
+
+  const handleResume = async () => {
+    if (!projectId) return;
+    setActionState('resuming');
+    setActionError(null);
+    try {
+      // The real pipeline (agent_runner.run_pipeline) already skips
+      // completed stages and reuses any artifact a previously-failed stage
+      // already produced — re-triggering it is exactly "resume".
+      await apiRequest(`/projects/${projectId}/pipeline/trigger`, { method: 'POST' });
+      setTimeout(load, 1000);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Failed to resume pipeline');
+    } finally {
+      setActionState('idle');
+    }
+  };
+
+  const handleRestart = async () => {
+    if (!projectId) return;
+    setActionState('restarting');
+    setActionError(null);
+    try {
+      await apiRequest(`/projects/${projectId}/pipeline/reset`, { method: 'POST' });
+      await apiRequest(`/projects/${projectId}/pipeline/trigger`, { method: 'POST' });
+      setTimeout(load, 1000);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Failed to restart pipeline');
+    } finally {
+      setActionState('idle');
+    }
+  };
+
+  if (!projectId) {
+    return (
+      <Card>
+        <h3 className="section-title mb-1">Pipeline Checkpoints</h3>
+        <p className="text-xs text-text-muted">Select a project in the Dashboard to view checkpoint status.</p>
+      </Card>
+    );
+  }
+
+  const hasFailed = runs?.some((r) => r.status === 'failed') ?? false;
+  const lastCompleted = runs ? [...runs].reverse().find((r) => r.status === 'completed') : null;
+  const firstFailed = runs?.find((r) => r.status === 'failed');
+  const completedCount = runs?.filter((r) => r.status === 'completed').length ?? 0;
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="section-title mb-0">Pipeline Checkpoints</h3>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleResume}
+            disabled={!hasFailed || actionState !== 'idle'}
+            className="btn-ghost text-xs flex items-center disabled:opacity-40"
+            title={!hasFailed ? 'No failed stage to resume from' : 'Retry the failed stage and continue from there'}
+          >
+            {actionState === 'resuming' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <PlayCircle className="mr-1 h-3 w-3" />}
+            Resume
+          </button>
+          <button
+            onClick={handleRestart}
+            disabled={actionState !== 'idle' || !runs?.length}
+            className="btn-ghost text-xs flex items-center disabled:opacity-40"
+            title="Restart the entire pipeline from Memory"
+          >
+            {actionState === 'restarting' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RotateCcw className="mr-1 h-3 w-3" />}
+            Restart
+          </button>
+        </div>
+      </div>
+
+      {actionError && <div className="mb-3 text-xs text-status-error">{actionError}</div>}
+
+      {!runs || !runs.length ? (
+        <p className="text-xs text-text-muted">No pipeline runs yet for this project.</p>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-2 mb-3">
+            {runs.map((run) => (
+              <div
+                key={run.id}
+                className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] border ${
+                  run.status === 'completed' ? 'border-status-success/30 bg-status-success/10 text-status-success' :
+                  run.status === 'failed' ? 'border-status-error/30 bg-status-error/10 text-status-error' :
+                  run.status === 'running' ? 'border-status-info/30 bg-status-info/10 text-status-info' :
+                  'border-dark-border bg-dark-bg text-text-muted'
+                }`}
+              >
+                {stageIcon(run.status)}
+                {run.agent_name}
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-muted">
+            <span>Last completed: <span className="text-text-primary">{lastCompleted?.agent_name || '—'}</span></span>
+            <span>{firstFailed ? 'Failed at' : 'Status'}: <span className={firstFailed ? 'text-status-error' : 'text-text-primary'}>{firstFailed?.agent_name || (completedCount === runs.length ? 'Completed' : 'In progress')}</span></span>
+            <span>{completedCount}/{runs.length} stages</span>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
 
 const workflowSequence = [
   { name: 'Requirements', type: 'requirement', icon: FileSearch },
@@ -103,6 +254,9 @@ export function AgentControlCenter() {
           </button>
         </div>
       </div>
+
+      {/* Pipeline Checkpoints — real data, additive to the mock sections below */}
+      <PipelineCheckpointsCard />
 
       {/* Top Metrics */}
       <div className="grid gap-4 md:grid-cols-5">

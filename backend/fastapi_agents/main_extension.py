@@ -147,12 +147,11 @@ from . import ai_service
 from .ws_manager import manager
 
 
-# ── New Agent Imports ────────────────────────────────────────────────────────
-from .agents.uiux_agent import UIUXDesignAgent
-
-from .agents.security_agent import SecurityArchitectAgent
-
-from .agents.compliance_agent import ComplianceArchitectAgent
+# ── Agent Imports ────────────────────────────────────────────────────────────
+from .agents.registry import AgentFactory
+from .agents.uiux.agent import UIUXDesignAgent
+from .agents.security.agent import SecurityArchitectAgent
+from .agents.compliance.agent import ComplianceArchitectAgent
 
 
 
@@ -268,7 +267,8 @@ async def generate_requirements(
     _get_project_or_404(db, payload.project_id)
 
     try:
-        result = ai_service.generate_requirements(db, payload.project_id, payload.prompt, payload.document_ids)
+        agent = AgentFactory.create(_AgentName.REQUIREMENT_AGENT.value, db, payload.project_id)
+        result = agent.generate(db, payload.project_id, payload.prompt, payload.document_ids)
     except ai_service.AIGenerationError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
@@ -323,7 +323,8 @@ async def generate_user_stories(
     context = req_artifact.content if req_artifact else ""
 
     try:
-        result = ai_service.generate_user_stories(db, payload.project_id, context)
+        agent = AgentFactory.create(_AgentName.BUSINESS_ANALYST_AGENT.value, db, payload.project_id)
+        result = agent.generate(db, payload.project_id, context)
     except ai_service.AIGenerationError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
@@ -361,7 +362,8 @@ async def generate_architecture(
     context = project.description or project.name
 
     try:
-        result = ai_service.generate_architecture(db, payload.project_id, context)
+        agent = AgentFactory.create(_AgentName.SOLUTION_ARCHITECT_AGENT.value, db, payload.project_id)
+        result = agent.generate(db, payload.project_id, context)
     except ai_service.AIGenerationError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
@@ -502,7 +504,8 @@ async def generate_database_schema(
     context = project.description or project.name
 
     try:
-        result = ai_service.generate_database_schema(db, payload.project_id, context)
+        agent = AgentFactory.create(_AgentName.DATABASE_AGENT.value, db, payload.project_id)
+        result = agent.generate(db, payload.project_id, context)
     except ai_service.AIGenerationError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
@@ -516,11 +519,45 @@ async def generate_database_schema(
         "artifact_type": ArtifactType.SQL_SCHEMA.value,
     })
 
+    # DatabaseAgent's schema uses `entities`/`data_type`/`foreign_key` (its
+    # own established shape, kept during the Database Agent consolidation);
+    # this route's response_model (TableDef/RelationshipDef) predates that
+    # and expects `tables`/`type`/`via` — map field names here rather than
+    # changing either schema, so both stay their own source of truth.
+    entities = result.get("entities", [])
+    tables = [
+        {
+            "name": e.get("table_name", ""),
+            "columns": [
+                {
+                    "name": c.get("name", ""),
+                    "type": c.get("data_type", ""),
+                    "nullable": c.get("nullable", True),
+                    "primary_key": c.get("name") in (e.get("primary_keys") or []),
+                    "unique": c.get("name") in (e.get("unique_constraints") or []),
+                    "default": c.get("default_value"),
+                }
+                for c in (e.get("columns") or [])
+            ],
+            "indexes": e.get("indexes", []),
+        }
+        for e in entities
+    ]
+    relationships = [
+        {
+            "from_table": r.get("source_table", ""),
+            "to_table": r.get("target_table", ""),
+            "type": r.get("relation_type", ""),
+            "via": None,
+        }
+        for r in result.get("relationships", [])
+    ]
+
     return {
         "project_id": payload.project_id,
         "artifact_id": artifact.id,
-        "tables": result.get("tables", []),
-        "relationships": result.get("relationships", []),
+        "tables": tables,
+        "relationships": relationships,
         "sql_ddl": result.get("sql_ddl", ""),
     }
 
@@ -535,7 +572,8 @@ async def generate_api_design(
     context = project.description or project.name
 
     try:
-        result = ai_service.generate_api_design(db, payload.project_id, context)
+        from .agents.backend.agent import BackendAgent
+        result = BackendAgent.generate_api_design(db, payload.project_id, context)
     except ai_service.AIGenerationError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
@@ -1061,6 +1099,13 @@ async def decide_approval(
     approval.approved_by = current_user.id
     approval.comments = payload.comments
 
+    # Style-selection approvals carry the user's chosen style in the request
+    # body — persist it as its own artifact (this platform's single source
+    # of truth for generated/selected content) so agent_runner._build_context
+    # picks it up for the Frontend Agent on resume.
+    if approval.artifact_type == "ui_style_selection" and payload.decision == ApprovalStatus.APPROVED.value and payload.selection:
+        _save_artifact(db, project_id, "selected_ui_style", json.dumps(payload.selection, ensure_ascii=False))
+
     db.add(TimelineEvent(
         project_id=project_id,
         stage=f"Approval {payload.decision.capitalize()}: {approval.artifact_type}",
@@ -1088,6 +1133,7 @@ async def decide_approval(
     if payload.decision == ApprovalStatus.APPROVED.value and approval.artifact_type in (
         ArtifactType.REVIEW_1_CHECKPOINT.value,
         ArtifactType.REVIEW_2_CHECKPOINT.value,
+        "ui_style_selection",
     ):
         _asyncio.create_task(_agent_runner.run_pipeline(project_id))
 
@@ -1131,7 +1177,8 @@ def _run_review_endpoint(review_type: str):
             content = art.content if art else (payload.context or f"Review {review_type} for project {payload.project_id}")
 
         try:
-            result = ai_service.run_review(db, payload.project_id, review_type, content)
+            from .agents.review.agent import ReviewAgent
+            result = ReviewAgent.review(db, payload.project_id, review_type, content)
         except ai_service.AIGenerationError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 

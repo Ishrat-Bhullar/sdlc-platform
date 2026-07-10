@@ -423,7 +423,8 @@ def _register(app_router: APIRouter, get_db_fn, get_current_user_fn, models, ws_
     This factory pattern keeps us decoupled from main.py's import chain —
     main_extension.py calls this once during startup.
     """
-    from .agents.presentation_video_agent import PresentationVideoAgent, VideoGenerationPipeline
+    from .agents.presentation.agent import PresentationVideoAgent
+    from .agents.presentation.video_pipeline import VideoGenerationPipeline
     from .pptx_builder import build_pptx
     from .services.video_generation_service import VoiceConfig as PipelineVoiceConfig
     from .services.video_generation_service import AvatarRenderConfig as PipelineAvatarConfig

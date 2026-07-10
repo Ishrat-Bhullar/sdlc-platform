@@ -310,6 +310,48 @@ const getPipelineStatus = async (req, res, next) => {
   }
 };
 
+// ── Resume pipeline from the last failed checkpoint ────────────────────────
+const resumeProject = async (req, res, next) => {
+  try {
+    const projectId = req.params.id;
+    const proj = await query('SELECT id FROM projects WHERE id = $1', [projectId]);
+    if (!proj.rows.length) return res.status(404).json({ error: 'NotFound', message: 'Project not found' });
+
+    (async () => {
+      try {
+        await agentOrchestrator.resumePipeline(projectId, req.user?.id);
+      } catch (err) {
+        console.error(`[pipeline] resume failed for project ${projectId}:`, err.message);
+      }
+    })();
+
+    res.json({ message: 'Pipeline resume started' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ── Restart pipeline from the first stage (Memory) ─────────────────────────
+const restartProject = async (req, res, next) => {
+  try {
+    const projectId = req.params.id;
+    const proj = await query('SELECT id FROM projects WHERE id = $1', [projectId]);
+    if (!proj.rows.length) return res.status(404).json({ error: 'NotFound', message: 'Project not found' });
+
+    (async () => {
+      try {
+        await agentOrchestrator.restartPipeline(projectId, req.user?.id);
+      } catch (err) {
+        console.error(`[pipeline] restart failed for project ${projectId}:`, err.message);
+      }
+    })();
+
+    res.json({ message: 'Pipeline restart started' });
+  } catch (err) {
+    next(err);
+  }
+};
+
 const getGeneratedFiles = async (req, res, next) => {
   try {
     const result = await query(
@@ -343,6 +385,8 @@ module.exports = {
   getProjectAgents,
   runAgent,
   runAllAgents,
+  resumeProject,
+  restartProject,
   getGeneratedFiles,
   getPipelineStatus,
 };

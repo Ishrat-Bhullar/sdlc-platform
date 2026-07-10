@@ -142,6 +142,19 @@ class ConnectionManager:
             },
         })
 
+    # ------------------------------------------------------------------
+    # Live code-generation streaming (simulated replay of already-generated
+    # files — see agents.developer_studio.agent.DeveloperStudioAgent.stream_generated_files)
+    # ------------------------------------------------------------------
+    async def code_gen_started(self, project_id: int, payload: dict) -> None:
+        await self.broadcast(project_id, {"event": "code_gen_started", "project_id": project_id, "payload": payload})
+
+    async def code_chunk(self, project_id: int, payload: dict) -> None:
+        await self.broadcast(project_id, {"event": "code_chunk", "project_id": project_id, "payload": payload})
+
+    async def code_gen_completed(self, project_id: int, payload: dict) -> None:
+        await self.broadcast(project_id, {"event": "code_gen_completed", "project_id": project_id, "payload": payload})
+
 
 # Singleton shared across the whole application
 manager = ConnectionManager()

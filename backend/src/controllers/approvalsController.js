@@ -29,24 +29,41 @@ const getApproval = async (req, res, next) => {
 
 const approveApproval = async (req, res, next) => {
   try {
-    const { projectId, approvedBy, comment } = req.body;
+    const { projectId, approvedBy, comment, selection } = req.body;
     if (!projectId) return res.status(400).json({ error: 'ValidationError', message: 'projectId is required' });
-    
+
     // Find the pending approval for this project
     const result = await query(
       'SELECT * FROM approvals WHERE project_id = $1 AND status = $2 ORDER BY created_at ASC LIMIT 1',
       [projectId, 'pending']
     );
-    
+
     if (!result.rows.length) {
       return res.status(404).json({ error: 'NotFound', message: 'No pending approval found for this project' });
     }
-    
+
     const approval = result.rows[0];
     const updated = await query(
       `UPDATE approvals SET status = $1, approved_by = $2, comment = $3, decided_at = NOW() WHERE id = $4 RETURNING *`,
       ['approved', approvedBy || null, comment || null, approval.id]
     );
+
+    // Style-selection approvals carry the user's chosen style in the request
+    // body — persist it to project_memory so the Frontend Agent's prompt
+    // (agentOrchestrator._fetchSelectedUiStyle) can pick it up on resume.
+    if (approval.type === 'style-selection' && selection) {
+      try {
+        await query(
+          `INSERT INTO project_memory (project_id, key, value, namespace)
+           VALUES ($1, 'selected_ui_style', $2, 'design')
+           ON CONFLICT (project_id, key, namespace)
+           DO UPDATE SET value = $2, updated_at = NOW()`,
+          [projectId, JSON.stringify(selection)]
+        );
+      } catch (memErr) {
+        console.error(`[approval] failed to persist selected_ui_style for project ${projectId}:`, memErr.message);
+      }
+    }
 
     emitApprovalCompleted(projectId, approval.id, 'approved', approvedBy || null);
 

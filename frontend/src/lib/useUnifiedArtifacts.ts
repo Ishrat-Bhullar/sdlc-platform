@@ -114,20 +114,42 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
     load();
   }, [load]);
 
-  const getArtifact = useCallback(
-    (type: ArtifactType): Record<string, unknown> | null => {
-      const match = artifacts.find((a) => a.artifact_type === type);
-      if (!match) return null;
-      return parseContent(match.content);
+  // GET /generated_artifacts returns every row ever created for the project,
+  // oldest first (created_at ASC) — an agent can be re-run any number of times
+  // (retry after failure, explicit re-run, Resume) and each run inserts a new
+  // row rather than overwriting the old one. Picking the *first* match of a
+  // type therefore returns the earliest generation, not the current one; on
+  // any project with a re-run this silently showed stale/empty content (e.g.
+  // an early failed attempt's 0-file result instead of the successful retry).
+  // Sort by created_at (id as a tiebreaker) and take the last one instead.
+  const latestByType = useCallback(
+    (type: ArtifactType): Artifact | null => {
+      const matches = artifacts.filter((a) => a.artifact_type === type);
+      if (matches.length === 0) return null;
+      return matches.reduce((latest, a) => {
+        const latestTime = Date.parse(latest.created_at) || 0;
+        const aTime = Date.parse(a.created_at) || 0;
+        if (aTime !== latestTime) return aTime > latestTime ? a : latest;
+        return Number(a.id) > Number(latest.id) ? a : latest;
+      });
     },
     [artifacts]
   );
 
+  const getArtifact = useCallback(
+    (type: ArtifactType): Record<string, unknown> | null => {
+      const match = latestByType(type);
+      if (!match) return null;
+      return parseContent(match.content);
+    },
+    [latestByType]
+  );
+
   const getRawArtifact = useCallback(
     (type: ArtifactType): Artifact | null => {
-      return artifacts.find((a) => a.artifact_type === type) ?? null;
+      return latestByType(type);
     },
-    [artifacts]
+    [latestByType]
   );
 
   const getApprovalStatus = useCallback(
@@ -233,13 +255,48 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
   const getDatabaseSchema = useCallback((): DatabaseSchemaContent | null => {
     const data = getArtifact('sql_schema') || getArtifact('database_schema');
     if (!data) return null;
+    // DatabaseAgent (agents/database/) — the platform's single Database Agent
+    // implementation — emits `entities` (table_name/columns[].data_type/
+    // primary_keys[]/unique_constraints[]) and `relationships` keyed by
+    // source_table/target_table/relation_type/foreign_key. This UI's
+    // TableDef/RelationshipDef shapes (tables/type/from_table/to_table)
+    // predate that and were never updated to match, so real generated
+    // schemas silently rendered as "0 tables" here. Map field names at this
+    // boundary rather than changing either schema's own vocabulary.
+    const rawEntities = (data.entities as any[]) || (data.tables as any[]) || [];
+    const tables = rawEntities.map((e) => {
+      if (e && Array.isArray(e.columns) && e.columns.length > 0 && 'data_type' in e.columns[0]) {
+        const primaryKeys: string[] = e.primary_keys || [];
+        const uniqueConstraints: string[] = e.unique_constraints || [];
+        return {
+          name: e.table_name || e.name || '',
+          columns: (e.columns || []).map((c: any) => ({
+            name: c.name,
+            type: c.data_type,
+            nullable: c.nullable,
+            primary_key: primaryKeys.includes(c.name),
+            unique: uniqueConstraints.includes(c.name),
+            default: c.default_value,
+          })),
+          indexes: e.indexes || [],
+        };
+      }
+      return e; // already in {name, columns:[{type,...}], indexes} shape
+    });
+    const rawRelationships = (data.relationships as any[]) || [];
+    const relationships = rawRelationships.map((r) =>
+      'source_table' in r
+        ? { from_table: r.source_table, to_table: r.target_table, type: r.relation_type, via: r.foreign_key || undefined }
+        : r
+    );
     return {
-      tables: (data.tables as any[]) || [],
-      relationships: (data.relationships as any[]) || [],
+      tables,
+      relationships,
       sql_ddl: (data.sql_ddl as string) || (data.migrationSQL as string) || '',
       normalization_notes: (data.normalization_notes as string) || '',
       audit_tables: (data.audit_tables as string[]) || [],
       sample_data: (data.sample_data as Record<string, any[]>) || {},
+      migrations: (data.migrations as DatabaseSchemaContent['migrations']) || null,
       scaling_strategy: (data.scaling_strategy as string) || '',
       partitioning_recommendations: (data.partitioning_recommendations as string) || '',
       design_decisions: (data.design_decisions as any[]) || [],
@@ -266,6 +323,7 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
       wireframes: (data.wireframes as UIUXDesignContent['wireframes']) || [],
       componentRecommendations: (data.componentRecommendations as UIUXDesignContent['componentRecommendations']) || [],
       uxRecommendations: (data.uxRecommendations as string[]) || [],
+      styleOptions: (data.styleOptions as UIUXDesignContent['styleOptions']) || [],
     };
   }, [getArtifact]);
 

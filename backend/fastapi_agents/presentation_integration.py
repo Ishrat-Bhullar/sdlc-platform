@@ -42,128 +42,16 @@ def integrate() -> None:
     except Exception as exc:
         logger.error("[PresentationIntegration] agent_runner patching failed: %s", exc)
 
-    # ── Step 3: Register ai_service.generate_presentation function ────────
-    try:
-        from . import ai_service
-        from .agents.presentation_video_agent import PresentationVideoAgent
-
-        def generate_presentation(db, project_id: int, context: str) -> dict:
-            """
-            ai_service wrapper for the Presentation & Video Agent.
-            Called by agent_runner._execute_agent when generate='generate_presentation'.
-            """
-            try:
-                agent = PresentationVideoAgent(db=db, project_id=project_id)
-
-                # Build full artifact context (not just the slim context string)
-                from .models import GeneratedArtifact
-                artifacts = (
-                    db.query(GeneratedArtifact)
-                    .filter(GeneratedArtifact.project_id == project_id)
-                    .order_by(GeneratedArtifact.created_at.asc())
-                    .all()
-                )
-                ctx_parts = [f"Context: {context}\n"]
-                for art in artifacts:
-                    content = (art.content or "")[:2000]
-                    ctx_parts.append(f"=== {art.artifact_type} ===\n{content}\n")
-                full_context = "\n".join(ctx_parts)
-
-                return agent.run(
-                    artifacts_context=full_context,
-                    presentation_tone="executive",
-                    target_audience="C-suite executives and engineering leadership",
-                    generate_video=False,
-                )
-            except Exception as exc:
-                logger.error("[generate_presentation] Failed: %s", exc, exc_info=True)
-                # Return minimal valid structure so artifact save doesn't fail
-                return {
-                    "executive_summary": f"Presentation generation failed: {exc}",
-                    "slide_outline": [],
-                    "speaker_notes": [],
-                    "storyboard": [],
-                    "presentation_script": "",
-                    "quality_score": 0,
-                    "error": str(exc),
-                }
-
-        if not hasattr(ai_service, "generate_presentation"):
-            ai_service.generate_presentation = generate_presentation
-            logger.info("[PresentationIntegration] Registered ai_service.generate_presentation")
-
-    except Exception as exc:
-        logger.error("[PresentationIntegration] ai_service registration failed: %s", exc)
-
-    # ── Step 3b: Register ai_service.generate_presentation_video function ─
-    # Mirrors Step 3 above exactly (same registration convention used
-    # throughout this module) — adds video/avatar rendering without touching
-    # ai_service.py directly, consistent with how generate_presentation itself
-    # is attached.
-    try:
-        from . import ai_service
-        from .agents.presentation_video_agent import VideoGenerationPipeline
-        from .services.video_generation_service import VoiceConfig as _PipelineVoiceConfig
-        from .services.video_generation_service import AvatarRenderConfig as _PipelineAvatarConfig
-        from .pptx_builder import build_pptx
-
-        def generate_presentation_video(db, project_id: int, context: str, **kwargs) -> dict:
-            """
-            ai_service wrapper for the Presentation Video Generation Pipeline.
-            Renders a narrated MP4 (and, if avatar_enabled, a Hedra AI avatar
-            MP4) from the project's latest PRESENTATION artifact. Returns a
-            plain dict (not persisted here — persistence/artifact creation is
-            handled by the dedicated POST /presentation/video/generate route,
-            same separation already used for generate_presentation/_register).
-            """
-            try:
-                from .models import GeneratedArtifact, ArtifactType, Project
-                import json as _json
-
-                project = db.get(Project, project_id)
-                artifact = (
-                    db.query(GeneratedArtifact)
-                    .filter(
-                        GeneratedArtifact.project_id == project_id,
-                        GeneratedArtifact.artifact_type == ArtifactType.PRESENTATION.value,
-                    )
-                    .order_by(GeneratedArtifact.created_at.desc())
-                    .first()
-                )
-                if not artifact:
-                    raise ValueError("No PRESENTATION artifact found; run generate_presentation first.")
-
-                data = _json.loads(artifact.content)
-                pptx_spec = data.get("pptx_spec", {})
-                pptx_bytes = build_pptx(pptx_spec, project_name=project.name if project else "Presentation")
-
-                voice_cfg = _PipelineVoiceConfig(**kwargs.get("voice_config", {}))
-                avatar_cfg = _PipelineAvatarConfig(**kwargs.get("avatar_config", {}))
-
-                pipeline = VideoGenerationPipeline()
-                result = pipeline.run(
-                    pptx_bytes=pptx_bytes,
-                    slides=pptx_spec.get("slides", []),
-                    full_script=data.get("presentation_script", ""),
-                    voice_config=voice_cfg,
-                    avatar_config=avatar_cfg,
-                    video_enabled=kwargs.get("video_enabled", True),
-                )
-                return result.model_dump()
-            except Exception as exc:
-                logger.error("[generate_presentation_video] Failed: %s", exc, exc_info=True)
-                return {
-                    "video_available": False,
-                    "avatar_available": False,
-                    "error": str(exc),
-                }
-
-        if not hasattr(ai_service, "generate_presentation_video"):
-            ai_service.generate_presentation_video = generate_presentation_video
-            logger.info("[PresentationIntegration] Registered ai_service.generate_presentation_video")
-
-    except Exception as exc:
-        logger.error("[PresentationIntegration] ai_service video registration failed: %s", exc)
+    # Step 3 / Step 3b removed: these used to monkey-patch
+    # ai_service.generate_presentation / generate_presentation_video onto the
+    # ai_service module at startup. As of the agents/<name>/ architectural
+    # refactor, nothing reads those attributes anymore — agent_runner.py
+    # dispatches to PresentationVideoAgent.generate(...) directly via
+    # AgentFactory (agents/registry.py), and presentation_routes.py already
+    # imports PresentationVideoAgent / VideoGenerationPipeline directly from
+    # agents/presentation/ rather than going through ai_service. Verified via
+    # a full-codebase search: no caller ever read
+    # ai_service.generate_presentation or ai_service.generate_presentation_video.
 
     # ── Step 4: Register routes onto the extension router ─────────────────
     # This MUST succeed or the application should fail to start

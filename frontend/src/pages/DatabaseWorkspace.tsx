@@ -42,7 +42,7 @@ export function DatabaseWorkspace() {
   const [selectedTable, setSelectedTable] = useState<string | null>('users');
 
   const projectId = getSelectedProjectId();
-  const { getDatabaseSchema, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
+  const { getDatabaseSchema, getApprovalStatus, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
 
   const [recentActivity, setRecentActivity] = useState<TimelineEvent[]>([]);
 
@@ -68,6 +68,8 @@ export function DatabaseWorkspace() {
   const sampleData = dbData?.sample_data || {};
   const scalingStrategy = dbData?.scaling_strategy || '';
   const partitioningRecommendations = dbData?.partitioning_recommendations || '';
+  const migration = dbData?.migrations || null;
+  const approvalStatus = getApprovalStatus('sql_schema');
 
   const selectedTableData = tables.find((t: any) => t.name === selectedTable) || null;
 
@@ -78,13 +80,6 @@ export function DatabaseWorkspace() {
     0
   );
   const totalIndexCount = tables.reduce((acc: number, t: any) => acc + (t.indexes?.length || 0), 0);
-
-  const migrationStatus = [
-    { id: 'M001', name: 'Initial Schema', status: 'applied', timestamp: new Date(Date.now() - 86400000) },
-    { id: 'M002', name: 'Add Audit Tables', status: 'applied', timestamp: new Date(Date.now() - 43200000) },
-    { id: 'M003', name: 'Add Indexes', status: 'pending', timestamp: null },
-    { id: 'M004', name: 'Partitioning Setup', status: 'pending', timestamp: null },
-  ];
 
   const tableCount = tables.length;
   const relationshipCount = relationships.length;
@@ -128,14 +123,17 @@ export function DatabaseWorkspace() {
           <p className="mt-1 text-sm text-text-muted">Database schema designed by Database Agent</p>
         </div>
         <div className="flex items-center gap-3">
-          <StatusBadge status="info">
-            <Clock className="mr-1 h-3 w-3" />
-            Pending Approval
-          </StatusBadge>
-          <button className="btn-primary text-sm">
-            <CheckCircle2 className="mr-2 h-4 w-4" />
-            Approve Schema
-          </button>
+          {approvalStatus === 'Approved' ? (
+            <StatusBadge status="success">
+              <CheckCircle2 className="mr-1 h-3 w-3" />
+              Approved
+            </StatusBadge>
+          ) : approvalStatus ? (
+            <StatusBadge status="info">
+              <Clock className="mr-1 h-3 w-3" />
+              {approvalStatus}
+            </StatusBadge>
+          ) : null}
         </div>
       </div>
 
@@ -158,8 +156,8 @@ export function DatabaseWorkspace() {
         </Card>
         <Card className="text-center">
           <FileCode2 className="h-6 w-6 mx-auto text-status-success mb-2" />
-          <p className="text-2xl font-bold text-text-primary">2</p>
-          <p className="text-xs text-text-muted">Migrations Applied</p>
+          <p className="text-2xl font-bold text-text-primary">{migration ? migration.up.length : 0}</p>
+          <p className="text-xs text-text-muted">Migration Statements</p>
         </Card>
       </div>
 
@@ -291,38 +289,27 @@ export function DatabaseWorkspace() {
           {/* Migrations */}
           {activeTab === 'migrations' && (
             <Card>
-              <div className="space-y-3">
-                {migrationStatus.map((migration) => (
-                  <div
-                    key={migration.id}
-                    className="flex items-center justify-between rounded-lg bg-dark-bg p-3"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className={`h-8 w-8 rounded flex items-center justify-center ${
-                        migration.status === 'applied' ? 'bg-status-success/10' : 'bg-dark-card'
-                      }`}>
-                        {migration.status === 'applied' ? (
-                          <CheckCircle2 className="h-4 w-4 text-status-success" />
-                        ) : (
-                          <Clock className="h-4 w-4 text-text-muted" />
-                        )}
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-text-primary">{migration.name}</p>
-                        <p className="text-xs text-text-muted">{migration.id}</p>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <StatusBadge status={migration.status === 'applied' ? 'success' : 'pending'}>
-                        {migration.status}
-                      </StatusBadge>
-                      {migration.timestamp && (
-                        <p className="text-xs text-text-muted mt-1">{migration.timestamp.toLocaleDateString()}</p>
-                      )}
-                    </div>
+              {!migration ? (
+                <div className="py-8 text-center">
+                  <FileCode2 className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+                  <p className="text-sm text-text-muted">No migration generated yet.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2">
+                    <FileCode2 className="h-4 w-4 text-ey-yellow" />
+                    <span className="text-sm font-medium text-text-primary">{migration.version}</span>
                   </div>
-                ))}
-              </div>
+                  <div>
+                    <p className="text-xs text-text-muted mb-2">Up ({migration.up.length} statement{migration.up.length === 1 ? '' : 's'})</p>
+                    <CodeBlock language="sql" code={migration.up.join('\n\n')} maxHeight="300px" />
+                  </div>
+                  <div>
+                    <p className="text-xs text-text-muted mb-2">Down ({migration.down.length} statement{migration.down.length === 1 ? '' : 's'})</p>
+                    <CodeBlock language="sql" code={migration.down.join('\n\n')} maxHeight="300px" />
+                  </div>
+                </div>
+              )}
             </Card>
           )}
 

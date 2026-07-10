@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.app.json"
   },
   "dependencies": {
+    "@babel/standalone": "^8.0.4",
     "@supabase/supabase-js": "^2.57.4",
     "@tanstack/react-table": "^8.21.3",
     "@types/dompurify": "^3.0.5",
@@ -27,6 +28,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.9.1",
+    "@types/babel__standalone": "^7.1.9",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",

@@ -122,6 +122,27 @@ const emitProjectProgress = (projectId, progress, status) =>
     payload: { progress, status },
   });
 
+// ── Live code-generation streaming (simulated replay of already-generated
+// files — see agentOrchestrator._streamGeneratedFiles) ─────────────────────
+
+const emitCodeGenStarted = (projectId, agentType, totalFiles) =>
+  broadcast(projectId, {
+    event: 'code_gen_started',
+    payload: { agentType, totalFiles },
+  });
+
+const emitCodeChunk = (projectId, agentType, filePath, language, chunk, isFirstChunk, isLastChunk) =>
+  broadcast(projectId, {
+    event: 'code_chunk',
+    payload: { agentType, filePath, language, chunk, isFirstChunk, isLastChunk },
+  });
+
+const emitCodeGenCompleted = (projectId, agentType, fileCount, linesOfCode) =>
+  broadcast(projectId, {
+    event: 'code_gen_completed',
+    payload: { agentType, fileCount, linesOfCode },
+  });
+
 module.exports = {
   initWebSocket,
   broadcast,
@@ -132,4 +153,7 @@ module.exports = {
   emitApprovalRequested,
   emitApprovalCompleted,
   emitProjectProgress,
+  emitCodeGenStarted,
+  emitCodeChunk,
+  emitCodeGenCompleted,
 };

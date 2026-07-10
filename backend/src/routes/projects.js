@@ -9,6 +9,8 @@ const {
   getProjectAgents,
   runAgent,
   runAllAgents,
+  resumeProject,
+  restartProject,
   getGeneratedFiles,
   getPipelineStatus,
 } = require('../controllers/projectsController');
@@ -115,6 +117,24 @@ router.get('/:id/agents', getProjectAgents);
  *     tags: [Projects]
  */
 router.post('/:id/agents/run-all', runAllAgents);
+
+/**
+ * @swagger
+ * /api/projects/{id}/agents/resume:
+ *   post:
+ *     summary: Resume the pipeline from the last failed checkpoint (does not re-run completed stages)
+ *     tags: [Projects]
+ */
+router.post('/:id/agents/resume', resumeProject);
+
+/**
+ * @swagger
+ * /api/projects/{id}/agents/restart:
+ *   post:
+ *     summary: Restart the pipeline from the first stage (Memory)
+ *     tags: [Projects]
+ */
+router.post('/:id/agents/restart', restartProject);
 
 /**
  * @swagger

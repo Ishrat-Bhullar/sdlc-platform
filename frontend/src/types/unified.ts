@@ -68,7 +68,8 @@ export type ArtifactType =
   | 'database_schema'
   | 'ui_ux_design'
   | 'security_architecture'
-  | 'compliance_architecture';
+  | 'compliance_architecture'
+  | 'selected_ui_style';
 
 export interface Approval {
   id: string;
@@ -264,6 +265,12 @@ export interface Diagram {
   content: string;
 }
 
+export interface DatabaseMigration {
+  version: string;
+  up: string[];
+  down: string[];
+}
+
 export interface DatabaseSchemaContent {
   tables: TableDef[];
   relationships: RelationshipDef[];
@@ -274,6 +281,7 @@ export interface DatabaseSchemaContent {
   scaling_strategy?: string;
   partitioning_recommendations?: string;
   design_decisions?: { decision: string; rationale: string }[];
+  migrations?: DatabaseMigration | null;
 }
 
 export interface TableDef {
@@ -341,12 +349,28 @@ export interface UIUXComponentRecommendation {
   rationale: string;
 }
 
+export interface UIUXColorToken {
+  name: string;
+  hex: string;
+  usage: string;
+}
+
+export interface UIUXStyleOption {
+  name: string;
+  description: string;
+  colorPalette?: { primary?: UIUXColorToken[]; neutral?: UIUXColorToken[]; semantic?: UIUXColorToken[] };
+  typography?: { fontFamily?: string };
+  buttonStyle?: string;
+  layoutDescription?: string;
+}
+
 export interface UIUXDesignContent {
   screens: UIUXScreen[];
   userFlows: UIUXUserFlow[];
   wireframes: UIUXWireframe[];
   componentRecommendations: UIUXComponentRecommendation[];
   uxRecommendations: string[];
+  styleOptions: UIUXStyleOption[];
 }
 
 export interface SecurityThreat {
