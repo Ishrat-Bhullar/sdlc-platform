@@ -26,6 +26,9 @@ import { TestingWorkspace } from './pages/TestingWorkspace';
 import { DocumentationWorkspace } from './pages/DocumentationWorkspace';
 import { AuthProvider, useAuth } from './lib/auth';
 import { ToastProvider } from './components/ui/Toast';
+import { ThemeProvider } from './lib/theme';
+import { GlobalLoadingProvider } from './lib/GlobalLoadingContext';
+import { AgentStatusProvider } from './lib/AgentStatusService';
 import { Loader2 } from 'lucide-react';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -48,7 +51,18 @@ function AppRoutes() {
     <Routes>
       <Route path="/" element={<AIWorkspace />} />
       <Route path="/signin" element={<SignIn />} />
-      <Route path="/app" element={<ProtectedRoute><MainLayout /></ProtectedRoute>}>
+      <Route
+        path="/app"
+        element={
+          <ProtectedRoute>
+            <GlobalLoadingProvider>
+              <AgentStatusProvider>
+                <MainLayout />
+              </AgentStatusProvider>
+            </GlobalLoadingProvider>
+          </ProtectedRoute>
+        }
+      >
         <Route index element={<Navigate to="/app/dashboard" replace />} />
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="projects" element={<Projects />} />
@@ -79,13 +93,15 @@ function AppRoutes() {
 
 function App() {
   return (
-    <AuthProvider>
-      <ToastProvider>
-        <Router>
-          <AppRoutes />
-        </Router>
-      </ToastProvider>
-    </AuthProvider>
+    <ThemeProvider>
+      <AuthProvider>
+        <ToastProvider>
+          <Router>
+            <AppRoutes />
+          </Router>
+        </ToastProvider>
+      </AuthProvider>
+    </ThemeProvider>
   );
 }
 

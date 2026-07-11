@@ -1,9 +1,9 @@
 """\npresentation_integration.py\n============================\nStatic integration module for the Presentation & Video Generation Agent.\n\nThis module is intentionally *route-only* now. Presentation execution is wired\nper-agent inside agent_runner.py with the same lifecycle semantics as the other\nSDLC agents, including the required Human Review Checkpoint 2 approval gate.\n\nIt registers presentation API routes onto the existing FastAPI router during\nstartup via main_extension.py.\n\nHOW TO USE\n----------\nAdd these lines to the bottom of main_extension.py (after the last route):\n\n    from . import presentation_integration  # noqa: F401\n"""
 from __future__ import annotations
 
-import logging
+from .logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def integrate() -> None:

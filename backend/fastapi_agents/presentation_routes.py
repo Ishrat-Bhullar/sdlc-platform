@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import logging
+from .logging_config import get_logger
 import asyncio
 from datetime import datetime, timezone
 from io import BytesIO
@@ -55,7 +55,7 @@ from .presentation_schemas import (
     QualityReview,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Kept for backwards-compat with any external import of `router`; the actual
 # routes used by the app are registered onto `app_router` inside `_register`.

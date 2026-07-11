@@ -1,10 +1,8 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { motion } from 'framer-motion';
 import {
   Building2,
   Clock,
   CheckCircle2,
-  ArrowDown,
   ArrowDownUp,
   Workflow,
   GitBranch,
@@ -14,17 +12,10 @@ import {
   Server,
   Database,
   Cloud,
-  Monitor,
   Globe,
-  Layers,
   Box,
   FileCode,
-  Eye,
-  Copy,
-  Check,
   AlertTriangle,
-  Shield,
-  Zap,
   Lightbulb,
   FileJson,
   FileType,
@@ -32,7 +23,9 @@ import {
   File,
   Loader2,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Card, StatusBadge } from '../components/ui/Card';
+import { ApprovalBanner } from '../components/ui/ApprovalStatus';
+import { RegenerateButton } from '../components/ui/RegenerateButton';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { ArchitectureDiagramViewer, DiagramData, sanitizeMermaidSource } from '../components/ArchitectureDiagramViewer';
 import { getSelectedProjectId } from '../lib/projectContext';
@@ -43,14 +36,13 @@ import type { Approval, ArchitectureContent } from '../types/unified';
 export function ArchitectureWorkspace() {
   const [activeTab, setActiveTab] = useState<'system' | 'component' | 'sequence' | 'class' | 'er' | 'deployment' | 'dataflow' | 'infrastructure' | 'network' | 'decisions'>('system');
   const [showJsonViewer, setShowJsonViewer] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [architectureApproval, setArchitectureApproval] = useState<Approval | null>(null);
   const [approving, setApproving] = useState(false);
   const { addToast } = useToast();
 
   const projectId = getSelectedProjectId();
-  const { getArchitecture, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
+  const { getArchitecture, getRawArtifact, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
 
   const loadApproval = async () => {
     if (!projectId) { setArchitectureApproval(null); return; }
@@ -102,9 +94,7 @@ export function ArchitectureWorkspace() {
   };
 
   const archData = getArchitecture();
-
-  const architectureVersion = 'v1.0.0';
-  const lastGenerated = new Date();
+  const archArtifact = getRawArtifact('architecture_diagram');
 
   const designDecisions = useMemo(() => {
     if (!archData?.architecture_decisions) return [] as any[];
@@ -129,28 +119,6 @@ export function ArchitectureWorkspace() {
     }));
   }, [archData]);
 
-  const getComponentIcon = (type: string) => {
-    switch (type) {
-      case 'frontend': return Monitor;
-      case 'api': return Globe;
-      case 'service': return Server;
-      case 'database': return Database;
-      case 'external': return Cloud;
-      default: return Box;
-    }
-  };
-
-  const getComponentColor = (type: string) => {
-    switch (type) {
-      case 'frontend': return 'text-status-info bg-status-info/10 border-status-info';
-      case 'api': return 'text-ey-yellow bg-ey-yellow/10 border-ey-yellow';
-      case 'service': return 'text-status-success bg-status-success/10 border-status-success';
-      case 'database': return 'text-purple-400 bg-purple-400/10 border-purple-400';
-      case 'external': return 'text-text-muted bg-dark-bg border-dark-border-light';
-      default: return 'text-text-secondary bg-dark-bg border-dark-border';
-    }
-  };
-
   const diagrams: DiagramData[] = useMemo(() => {
     if (!archData?.diagrams) return [];
     return archData.diagrams as DiagramData[];
@@ -160,28 +128,6 @@ export function ArchitectureWorkspace() {
     if (!archData?.components) return [];
     return archData.components as any[];
   }, [archData]);
-
-  const handleCopyJson = () => {
-    if (archData) {
-      navigator.clipboard.writeText(JSON.stringify(archData, null, 2));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
-  const handleDownloadJson = () => {
-    if (archData && projectId) {
-      const blob = new Blob([JSON.stringify(archData, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `architecture_${projectId}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }
-  };
 
   const handleExport = async (format: 'json' | 'md') => {
     if (!projectId) return;
@@ -221,13 +167,14 @@ export function ArchitectureWorkspace() {
           <p className="mt-1 text-sm text-text-muted">Solution architecture designed by Architect Agent</p>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 rounded-lg bg-dark-card px-3 py-1.5">
-            <Clock className="h-4 w-4 text-text-muted" />
-            <span className="text-xs text-text-muted">Last updated: {lastGenerated.toLocaleTimeString()}</span>
-          </div>
-          <span className="rounded-lg bg-ey-yellow/10 px-3 py-1.5 text-xs font-medium text-ey-yellow">
-            {architectureVersion}
-          </span>
+          {archArtifact && (
+            <div className="flex items-center gap-2 rounded-lg bg-dark-card px-3 py-1.5">
+              <Clock className="h-4 w-4 text-text-muted" />
+              <span className="text-xs text-text-muted">
+                Generated {new Date(archArtifact.created_at).toLocaleString()}
+              </span>
+            </div>
+          )}
           {architectureApproval?.status === 'Approved' ? (
             <StatusBadge status="success">
               <CheckCircle2 className="mr-1 h-3 w-3" />
@@ -247,6 +194,11 @@ export function ArchitectureWorkspace() {
         </div>
       </div>
 
+      <ApprovalBanner
+        status={architectureApproval?.status || null}
+        note="Review this architecture, then approve it above or from the Approval Center."
+      />
+
       {error && (
         <Card className="border-status-error/30 bg-status-error/5 text-sm text-status-error">
           <div className="flex items-center gap-2">
@@ -262,6 +214,17 @@ export function ArchitectureWorkspace() {
           <Building2 className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
           <p className="text-sm font-medium text-text-primary">No architecture generated yet</p>
           <p className="text-xs text-text-muted mt-1">Run the Architect Agent in the pipeline to generate architecture.</p>
+          {projectId && (
+            <div className="mt-4 flex justify-center">
+              <RegenerateButton
+                projectId={projectId}
+                agentName="Solution Architect Agent"
+                onRegenerated={reload}
+                label="Generate"
+                align="center"
+              />
+            </div>
+          )}
         </Card>
       ) : (
         <>
@@ -320,7 +283,7 @@ export function ArchitectureWorkspace() {
                 return (
                   <Card className="min-h-[520px]">
                     <div className="flex items-center justify-between mb-4">
-                      <h3 className="section-title mb-0">{match?.title || spec.label}</h3>
+                      <h3 className="section-title mb-0">{spec.label}</h3>
                       <div className="flex gap-2">
                         <button onClick={handleRegenerateDiagrams} disabled={regenerating} className="btn-ghost text-xs">
                           {regenerating ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}
@@ -349,212 +312,6 @@ export function ArchitectureWorkspace() {
                   </Card>
                 );
               })()}
-
-              {/* Legacy hidden block (kept for reference, never rendered) */}
-              {false && activeTab === 'system' && (
-                <Card className="h-[500px]">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="section-title mb-0">System Architecture</h3>
-                    <div className="flex gap-2">
-                      <button onClick={() => setShowJsonViewer(!showJsonViewer)} className="btn-ghost text-xs">
-                        <FileCode className="mr-1 h-3 w-3" />
-                        {showJsonViewer ? 'Hide' : 'View'} JSON
-                      </button>
-                    </div>
-                  </div>
-                  {showJsonViewer ? (
-                    <div className="relative">
-                      <pre className="max-h-96 overflow-auto rounded-lg bg-dark-bg p-4 text-xs text-text-secondary">
-                        {JSON.stringify(archData, null, 2)}
-                      </pre>
-                      <button
-                        onClick={handleCopyJson}
-                        className="absolute top-2 right-2 p-2 rounded-lg bg-dark-surface hover:bg-dark-border text-text-muted hover:text-text-primary"
-                        title="Copy JSON"
-                      >
-                        {copied ? <Check className="h-4 w-4 text-status-success" /> : <Copy className="h-4 w-4" />}
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex h-full items-center justify-center relative">
-                      {/* Architecture Visualization */}
-                      <div className="absolute inset-4 flex flex-col items-center justify-between">
-                        {/* Frontend Layer */}
-                        <div className="flex items-center gap-4">
-                          {components.filter((c: any) => c.type === 'frontend').map((component: any) => {
-                            const Icon = getComponentIcon(component.type);
-                            const colorClass = getComponentColor(component.type);
-                            return (
-                              <motion.div
-                                key={component.id ?? component.name}
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 ${colorClass}`}
-                              >
-                                <Icon className="h-8 w-8" />
-                                <span className="text-xs font-medium">{component.name}</span>
-                              </motion.div>
-                            );
-                          })}
-                        </div>
-
-                        <ArrowDown className="h-8 w-8 text-dark-border-light my-2" />
-
-                        {/* API Gateway */}
-                        <div className="flex items-center">
-                          {components.filter((c: any) => c.type === 'api').map((component: any) => {
-                            const Icon = getComponentIcon(component.type);
-                            const colorClass = getComponentColor(component.type);
-                            return (
-                              <motion.div
-                                key={component.id ?? component.name}
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                className={`flex flex-col items-center gap-2 rounded-lg border-2 px-8 py-4 ${colorClass}`}
-                              >
-                                <Icon className="h-8 w-8" />
-                                <span className="text-sm font-medium">{component.name}</span>
-                              </motion.div>
-                            );
-                          })}
-                        </div>
-
-                        <ArrowDown className="h-8 w-8 text-dark-border-light my-2" />
-
-                        {/* Services Layer */}
-                        <div className="flex items-center gap-4 flex-wrap justify-center">
-                          {components.filter((c: any) => c.type === 'service').map((component: any) => {
-                            const Icon = getComponentIcon(component.type);
-                            const colorClass = getComponentColor(component.type);
-                            return (
-                              <motion.div
-                                key={component.id ?? component.name}
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                transition={{ delay: component.id === '3' ? 0.2 : 0.3 }}
-                                className={`flex flex-col items-center gap-2 rounded-lg border-2 p-3 min-w-[100px] ${colorClass}`}
-                              >
-                                <Icon className="h-6 w-6" />
-                                <span className="text-xs font-medium text-center">{component.name}</span>
-                              </motion.div>
-                            );
-                          })}
-                        </div>
-
-                        <ArrowDown className="h-8 w-8 text-dark-border-light my-2" />
-
-                        {/* Database Layer */}
-                        <div className="flex items-center gap-4">
-                          {components.filter((c: any) => c.type === 'database').map((component: any) => {
-                            const Icon = getComponentIcon(component.type);
-                            const colorClass = getComponentColor(component.type);
-                            return (
-                              <motion.div
-                                key={component.id ?? component.name}
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                transition={{ delay: 0.4 }}
-                                className={`flex flex-col items-center gap-2 rounded-lg border-2 p-3 ${colorClass}`}
-                              >
-                                <Icon className="h-6 w-6" />
-                                <span className="text-xs font-medium">{component.name}</span>
-                              </motion.div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </Card>
-              )}
-
-              {/* Sequence Diagram */}
-              {false && activeTab === 'sequence' && (
-                <Card className="h-[500px]">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="section-title mb-0">Sequence Diagram</h3>
-                    <button onClick={() => setShowJsonViewer(!showJsonViewer)} className="btn-ghost text-xs">
-                      <FileCode className="mr-1 h-3 w-3" />
-                      {showJsonViewer ? 'Hide' : 'View'} JSON
-                    </button>
-                  </div>
-                  {showJsonViewer ? (
-                    <pre className="max-h-96 overflow-auto rounded-lg bg-dark-bg p-4 text-xs text-text-secondary">
-                      {JSON.stringify(archData, null, 2)}
-                    </pre>
-                  ) : (
-                    <div className="flex items-center justify-center h-96">
-                      <p className="text-sm text-text-muted">Sequence diagram visualization</p>
-                    </div>
-                  )}
-                </Card>
-              )}
-
-              {/* Component Diagram */}
-              {false && activeTab === 'component' && (
-                <Card className="h-[500px]">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="section-title mb-0">Component Diagram</h3>
-                    <button onClick={() => setShowJsonViewer(!showJsonViewer)} className="btn-ghost text-xs">
-                      <FileCode className="mr-1 h-3 w-3" />
-                      {showJsonViewer ? 'Hide' : 'View'} JSON
-                    </button>
-                  </div>
-                  {showJsonViewer ? (
-                    <pre className="max-h-96 overflow-auto rounded-lg bg-dark-bg p-4 text-xs text-text-secondary">
-                      {JSON.stringify(archData, null, 2)}
-                    </pre>
-                  ) : (
-                    <div className="flex items-center justify-center h-96">
-                      <p className="text-sm text-text-muted">Component diagram visualization</p>
-                    </div>
-                  )}
-                </Card>
-              )}
-
-              {/* Deployment Diagram */}
-              {false && activeTab === 'deployment' && (
-                <Card className="h-[500px]">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="section-title mb-0">Deployment Diagram</h3>
-                    <button onClick={() => setShowJsonViewer(!showJsonViewer)} className="btn-ghost text-xs">
-                      <FileCode className="mr-1 h-3 w-3" />
-                      {showJsonViewer ? 'Hide' : 'View'} JSON
-                    </button>
-                  </div>
-                  {showJsonViewer ? (
-                    <pre className="max-h-96 overflow-auto rounded-lg bg-dark-bg p-4 text-xs text-text-secondary">
-                      {JSON.stringify(archData, null, 2)}
-                    </pre>
-                  ) : (
-                    <div className="flex items-center justify-center h-96">
-                      <p className="text-sm text-text-muted">Deployment diagram visualization</p>
-                    </div>
-                  )}
-                </Card>
-              )}
-
-              {/* API Flows */}
-              {false && (
-                <Card className="h-[500px]">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="section-title mb-0">API Flows</h3>
-                    <button onClick={() => setShowJsonViewer(!showJsonViewer)} className="btn-ghost text-xs">
-                      <FileCode className="mr-1 h-3 w-3" />
-                      {showJsonViewer ? 'Hide' : 'View'} JSON
-                    </button>
-                  </div>
-                  {showJsonViewer ? (
-                    <pre className="max-h-96 overflow-auto rounded-lg bg-dark-bg p-4 text-xs text-text-secondary">
-                      {JSON.stringify(archData, null, 2)}
-                    </pre>
-                  ) : (
-                    <div className="flex items-center justify-center h-96">
-                      <p className="text-sm text-text-muted">API flow diagram visualization</p>
-                    </div>
-                  )}
-                </Card>
-              )}
 
               {/* Design Decisions */}
               {activeTab === 'decisions' && (
@@ -605,19 +362,26 @@ export function ArchitectureWorkspace() {
 
             {/* Right Panel: Architect Agent Activity */}
             <div className="space-y-6">
-              {/* Agent Status */}
+              {/* Agent Status — this panel only renders once archData exists,
+                  so the agent has already finished; status reflects real
+                  approval state, not a fabricated in-progress percentage. */}
               <Card glow>
                 <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-ey-yellow/10">
-                    <Building2 className="h-5 w-5 text-ey-yellow" />
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-status-success/10">
+                    <Building2 className="h-5 w-5 text-status-success" />
                   </div>
                   <div className="flex-1">
                     <p className="text-sm font-medium text-text-primary">Architect Agent</p>
-                    <p className="text-xs text-text-muted">Designing microservices architecture</p>
+                    <p className="text-xs text-text-muted">
+                      {architectureApproval?.status === 'Approved'
+                        ? 'Architecture approved'
+                        : `${components.length} component${components.length === 1 ? '' : 's'} · ${diagrams.length} diagram${diagrams.length === 1 ? '' : 's'} generated`}
+                    </p>
                   </div>
-                  <StatusBadge status="running">Active</StatusBadge>
+                  <StatusBadge status={architectureApproval?.status === 'Approved' ? 'success' : 'warning'}>
+                    {architectureApproval?.status === 'Approved' ? 'Approved' : 'Awaiting approval'}
+                  </StatusBadge>
                 </div>
-                <ProgressBar value={78} max={100} color="yellow" showLabel className="mt-4" />
               </Card>
 
               {/* Technology Stack */}
@@ -661,10 +425,19 @@ export function ArchitectureWorkspace() {
 
               {/* Actions */}
               <div className="flex gap-2">
-                <button className="btn-secondary flex-1 text-sm">
-                  <RefreshCw className="mr-2 h-4 w-4" />
-                  Regenerate
+                <button onClick={handleRegenerateDiagrams} disabled={regenerating} className="btn-secondary flex-1 text-sm disabled:opacity-50" title="Redraw diagrams only, without re-running the Architect Agent">
+                  {regenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                  Regenerate Diagrams
                 </button>
+                {projectId && (
+                  <RegenerateButton
+                    projectId={projectId}
+                    agentName="Solution Architect Agent"
+                    onRegenerated={reload}
+                    label="Regenerate Architecture"
+                    className="btn-ghost text-sm flex-1"
+                  />
+                )}
                 <div className="flex items-center gap-1">
                   <button onClick={() => handleExport('json')} className="btn-ghost text-xs" title="Export JSON">
                     <FileJson className="h-3.5 w-3.5" />

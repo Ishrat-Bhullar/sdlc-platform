@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, memo, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
-import { HumanApprovalModal } from '../components/HumanApprovalModal';
 import { SDLCPipelineCard } from '../components/Sdlcpipeline';
 import { ArchitectureDiagramViewer, DiagramData } from '../components/ArchitectureDiagramViewer';
 import { useToast } from '../components/ui/Toast';
@@ -31,6 +30,7 @@ import { Card, StatusBadge } from '../components/ui/Card';
 import { apiRequest, buildApiUrl } from '../lib/api';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId as getSavedProjectId, setSelectedProjectId as persistSelectedProjectId } from '../lib/projectContext';
+import { friendlyErrorMessage } from '../lib/friendlyError';
 import type { DashboardSummary, AgentRun, Artifact } from '../types/unified';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -53,34 +53,6 @@ function formatTimestamp(ts: string | null): string {
 }
 
 // Backend stores the raw exception text in output_url as {"error": "..."} on
-// failure (e.g. "All local models failed (qwen3:14b, gemma2:9b, ...). Last
-// error: HTTPConnectionPool...") — useful in logs, not something to show an
-// end user. Map known technical patterns to a plain-language summary; fall
-// back to a generic message rather than ever displaying raw provider/model
-// internals or stack-trace-shaped text.
-function friendlyErrorMessage(outputUrl: string | null): string {
-  let raw = '';
-  try {
-    raw = outputUrl ? (JSON.parse(outputUrl).error ?? '') : '';
-  } catch {
-    raw = outputUrl ?? '';
-  }
-  const lower = raw.toLowerCase();
-  if (lower.includes('rate limit') || lower.includes('429')) {
-    return 'AI provider rate limit reached — please retry in a few minutes.';
-  }
-  if (lower.includes('all local models failed') || lower.includes('connection refused') || lower.includes('httpconnectionpool')) {
-    return 'AI provider temporarily unavailable — please retry.';
-  }
-  if (lower.includes('validation error') || lower.includes('json')) {
-    return 'Generated content did not pass quality checks — please retry.';
-  }
-  if (lower.includes('empty') && (lower.includes('artifact') || lower.includes('plan') || lower.includes('context'))) {
-    return 'Not enough context to generate this step — check prior artifacts and retry.';
-  }
-  return 'This step failed unexpectedly — please retry.';
-}
-
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -105,10 +77,9 @@ const AgentRunRow = memo(function AgentRunRow({ run }: { run: AgentRun }) {
     : 'bg-dark-border';
   const duration = formatDuration(run.start_time, run.end_time);
   const isRunning = run.status === 'running';
-  const progressPct = run.status === 'completed' ? 100
-    : run.status === 'running' ? 65
-    : run.status === 'failed' ? 100
-    : 0;
+  // Terminal states (completed/failed) show a full bar as a real completion
+  // indicator. Running has no backend-tracked per-run progress percentage —
+  // showing an indeterminate sweep instead of a fabricated number.
 
   return (
     <div className="rounded-lg bg-dark-bg p-3 space-y-2">
@@ -136,10 +107,18 @@ const AgentRunRow = memo(function AgentRunRow({ run }: { run: AgentRun }) {
         </StatusBadge>
       </div>
       <div className="flex items-center gap-2">
-        <div className="flex-1 h-1.5 rounded-full bg-dark-border overflow-hidden">
-          <div className={`h-full rounded-full ${barColor} transition-all duration-500 ${isRunning ? 'animate-pulse' : ''}`} style={{ width: `${progressPct}%` }} />
+        <div className="flex-1 h-1.5 rounded-full bg-dark-border overflow-hidden relative">
+          {isRunning ? (
+            <div className={`absolute inset-y-0 left-0 w-1/3 rounded-full ${barColor} animate-[indeterminate_1.2s_ease-in-out_infinite]`} />
+          ) : (
+            <div className={`h-full rounded-full ${barColor}`} style={{ width: (run.status === 'completed' || run.status === 'failed') ? '100%' : '0%' }} />
+          )}
         </div>
-        <span className="text-[10px] font-mono text-text-muted w-8 text-right">{progressPct}%</span>
+        {!isRunning && (
+          <span className="text-[10px] font-mono text-text-muted w-8 text-right">
+            {run.status === 'completed' || run.status === 'failed' ? '100%' : '—'}
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-3 text-[10px] text-text-muted">
         {duration && <span className="flex items-center gap-1"><Timer className="h-3 w-3" />{duration}</span>}
@@ -175,12 +154,24 @@ export function Dashboard() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => {
     const statePid = location.state?.projectId;
     if (statePid) {
-      const str = typeof statePid === 'number' ? String(statePid) : statePid;
-      persistSelectedProjectId(str);
-      return str;
+      return typeof statePid === 'number' ? String(statePid) : statePid;
     }
     return getSavedProjectId();
   });
+
+  // Persisting (and thus broadcasting the project-change event) is a side
+  // effect — it must not run inside the useState initializer above, which
+  // fires synchronously during render. Ancestor components (AgentStatusProvider,
+  // GlobalLoadingProvider) subscribe to that event and call setState in
+  // response, which React flags as "Cannot update a component while
+  // rendering a different component" when triggered from render.
+  useEffect(() => {
+    const statePid = location.state?.projectId;
+    if (statePid) {
+      persistSelectedProjectId(typeof statePid === 'number' ? String(statePid) : statePid);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -480,15 +471,6 @@ export function Dashboard() {
           </div>
         </Card>
       )}
-
-      <HumanApprovalModal
-        projectId={selectedProjectId}
-        open={false}
-        artifacts={artifacts}
-        onApproved={() => fetchAll()}
-        onRejected={() => fetchAll()}
-        onReviewLater={() => {}}
-      />
     </div>
   );
 }

@@ -30,6 +30,9 @@ import {
   TestTube,
 } from 'lucide-react';
 import { AIReviewCopilot } from '../components/shared/AIReviewCopilot';
+import { AutoSaveIndicator } from '../components/shared/AutoSaveIndicator';
+import { WorkflowCoach } from '../components/WorkflowCoach';
+import { GlobalOrchestratorOverlay } from '../components/shared/GlobalOrchestratorOverlay';
 import { useAuth } from '../lib/auth';
 
 const navItems = [
@@ -50,7 +53,7 @@ const navItems = [
   { path: '/app/agents', label: 'Agent Control Center', icon: Bot },
   { path: '/app/approvals', label: 'Approvals Center', icon: CheckCircle2 },
   { path: '/app/mcp', label: 'MCP Integration Center', icon: Plug },
-  { path: '/app/monitoring', label: 'Monitoring Center', icon: Activity },
+  { path: '/app/monitoring', label: 'Platform Operations', icon: Activity },
   { path: '/app/temporal', label: 'Temporal Replay Center', icon: Clock },
   { path: '/app/video-generation', label: 'Video Generation Agent', icon: Video },
 ];
@@ -189,6 +192,8 @@ export function MainLayout() {
               <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-status-error" />
             </button>
 
+            <AutoSaveIndicator />
+
             {/* System Health */}
             <div className="flex items-center gap-2 rounded-lg bg-dark-bg px-3 py-1.5">
               <div className="h-2 w-2 rounded-full bg-status-success animate-pulse" />
@@ -236,6 +241,8 @@ export function MainLayout() {
         </main>
 
         <AIReviewCopilot />
+        <WorkflowCoach />
+        <GlobalOrchestratorOverlay />
       </div>
     </div>
   );

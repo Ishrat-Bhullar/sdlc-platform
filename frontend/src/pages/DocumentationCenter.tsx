@@ -887,6 +887,11 @@ export function DocumentationCenter() {
   const [searchQuery, setSearchQuery] = useState('');
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  // Real count of successful "Export All" downloads this session — not a
+  // fabricated cumulative metric, and not persisted (the backend doesn't
+  // track export history), so it resets on reload rather than claiming to
+  // be an all-time count.
+  const [exportCount, setExportCount] = useState(0);
   const [selectedArtifact, setSelectedArtifact] = useState<RawArtifact | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [generating, setGenerating] = useState<string | null>(null);
@@ -951,6 +956,7 @@ export function DocumentationCenter() {
       document.body.removeChild(a);
       URL.revokeObjectURL(blobUrl);
       setExportStatus('success');
+      setExportCount((c) => c + 1);
       setTimeout(() => setExportStatus('idle'), 3000);
     } catch {
       setExportStatus('error');
@@ -1288,8 +1294,8 @@ export function DocumentationCenter() {
         </Card>
         <Card className="text-center">
           <Download className="h-5 w-5 text-text-secondary mx-auto mb-2" />
-          <p className="text-2xl font-bold text-text-primary">{exportStatus === 'success' ? '1' : '0'}</p>
-          <p className="text-xs text-text-muted">Recent Exports</p>
+          <p className="text-2xl font-bold text-text-primary">{exportCount}</p>
+          <p className="text-xs text-text-muted">Exports This Session</p>
         </Card>
       </div>
 

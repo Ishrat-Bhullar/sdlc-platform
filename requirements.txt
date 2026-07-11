@@ -14,6 +14,15 @@ python-pptx==1.0.2
 Pillow>=12.2.0
 pdf2image>=1.17.0
 requests>=2.31.0
+# BRD/RFP document ingestion (main.py _extract_document_text) and PDF-to-slide
+# text extraction (presentation_routes.py _extract_pdf_text) — pdfplumber is
+# tried first, PyPDF2 is its documented fallback; python-docx is required for
+# .docx/.doc uploads. Without these, ingestion silently degrades to an empty
+# string rather than failing loudly, so the gap is easy to miss until a real
+# document is uploaded.
+pdfplumber>=0.11.0
+python-docx>=1.1.0
+PyPDF2>=3.0.0
 # System binaries required at runtime: libreoffice (soffice), ffmpeg, ffprobe, poppler (pdftoppm)
 # Video composition is pure FFmpeg (no MoviePy) — see video_pipeline_local.py / video_generation_service.py
 # Default TTS tier: edge-tts (free, no API key, Microsoft neural voices — tried
@@ -29,3 +38,15 @@ edge-tts>=7.0.0
 # Note: basicsr 1.4.2 imports torchvision.transforms.functional_tensor, removed in newer
 # torchvision. If you hit that ImportError, patch site-packages/basicsr/data/degradations.py:
 #   functional_tensor -> functional (see backend/fastapi_agents/video_pipeline_local.py::sadtalker_status)
+#
+# Optional: Azure Speech / Coqui XTTS narration (services/video_generation_service.py
+# NarrationService), used only by the separate /video/render "PDF-to-video" pipeline —
+# NOT the default Presentation Agent pipeline above, which already works out of the box
+# via edge-tts. Coqui's own ImportError is NOT caught if Azure also fails/is unconfigured,
+# so install at least one of these before using /video/render, or that endpoint will error:
+#   pip install azure-cognitiveservices-speech   # provider="azure" (default)
+#   pip install TTS                              # provider="coqui" fallback
+#
+# Optional: AI video generation (agents/presentation/agent.py, VIDEO_MODEL=zeroscope_v2
+# or VIDEO_MODEL=modelscope env var). Not used unless VIDEO_MODEL is explicitly set.
+#   pip install diffusers modelscope imageio

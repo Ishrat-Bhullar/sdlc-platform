@@ -9,7 +9,7 @@ the agents/<name>/ architectural refactor -- content unchanged.
 """
 from __future__ import annotations
 
-import logging
+from ...logging_config import get_logger
 
 from pydantic import BaseModel, Field
 
@@ -18,7 +18,7 @@ from .prompts import SLIDE_DESIGNER_SYSTEM_PROMPT
 from .schemas import PresentationConfig, PresentationSummary, Slide, cap, render_template
 from .scene_planner import ScenePlan
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class LogicAgentOutput(BaseModel):

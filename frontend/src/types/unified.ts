@@ -358,10 +358,70 @@ export interface UIUXColorToken {
 export interface UIUXStyleOption {
   name: string;
   description: string;
-  colorPalette?: { primary?: UIUXColorToken[]; neutral?: UIUXColorToken[]; semantic?: UIUXColorToken[] };
-  typography?: { fontFamily?: string };
+  colorPalette?: { primary?: UIUXColorToken[]; neutral?: UIUXColorToken[]; semantic?: UIUXColorToken[]; rationale?: string };
+  typography?: { fontFamily?: string; headingFont?: string; scale?: Record<string, string>; rationale?: string };
+  spacing?: { baseUnit?: string; scale?: string[]; rationale?: string };
   buttonStyle?: string;
   layoutDescription?: string;
+  // Makes this a complete, self-contained design (not just a theme) — once
+  // selected, this whole object becomes the Frontend Agent's build spec.
+  // All optional/defaulted for backward compat with style options
+  // generated before these fields existed.
+  navigation?: string;
+  screens?: UIUXScreen[];
+  componentRecommendations?: UIUXComponentRecommendation[];
+  dataVisualizations?: string[];
+  responsiveness?: string;
+}
+
+export interface UIUXTypography {
+  fontFamily: string;
+  headingFont: string;
+  scale: Record<string, string>;
+  rationale: string;
+}
+
+export interface UIUXSpacing {
+  baseUnit: string;
+  scale: string[];
+  rationale: string;
+}
+
+export interface UIUXColorPalette {
+  primary: UIUXColorToken[];
+  neutral: UIUXColorToken[];
+  semantic: UIUXColorToken[];
+  rationale: string;
+}
+
+export interface UIUXDesignSystemComponent {
+  name: string;
+  states: string[];
+  variants: string[];
+  accessibility_notes: string;
+}
+
+export interface UIUXResponsiveBreakpoint {
+  name: string;
+  min_width: string;
+  layout_behavior: string;
+}
+
+export interface UIUXAccessibilityRequirement {
+  guideline: string;
+  applies_to: string;
+  implementation: string;
+}
+
+// Matches backend/fastapi_agents/agents/uiux/schemas.py — DesignSystem
+export interface UIUXDesignSystem {
+  typography: UIUXTypography;
+  spacing: UIUXSpacing;
+  colorPalette: UIUXColorPalette;
+  components: UIUXDesignSystemComponent[];
+  responsiveBreakpoints: UIUXResponsiveBreakpoint[];
+  accessibility: UIUXAccessibilityRequirement[];
+  designPrinciples: string[];
 }
 
 export interface UIUXDesignContent {
@@ -370,6 +430,7 @@ export interface UIUXDesignContent {
   wireframes: UIUXWireframe[];
   componentRecommendations: UIUXComponentRecommendation[];
   uxRecommendations: string[];
+  designSystem: UIUXDesignSystem | null;
   styleOptions: UIUXStyleOption[];
 }
 

@@ -9,6 +9,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { apiRequest, FASTAPI_BASE_URL } from './api';
 import { getSelectedProjectId } from './projectContext';
 import type {
+  Approval,
   Artifact,
   ArtifactType,
   RequirementsContent,
@@ -69,6 +70,7 @@ export interface UseUnifiedArtifactsReturn {
 
 export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifactsReturn {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,6 +79,7 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
   const load = useCallback(async () => {
     if (!projectId) {
       setArtifacts([]);
+      setApprovals([]);
       requestProjectIdRef.current = null;
       return;
     }
@@ -86,13 +89,22 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
     setError(null);
 
     try {
-      const data = await apiRequest<Artifact[]>(`/generated_artifacts?project_id=${projectId}`);
+      // GeneratedArtifactOut never carries an approval_status field — the
+      // backend's generated_artifacts table has no such column (approvals
+      // are their own table, per artifact_type, not per artifact row). Fetch
+      // both in parallel and cross-reference by artifact_type below, rather
+      // than reading a field the API response never actually contains.
+      const [data, approvalsData] = await Promise.all([
+        apiRequest<Artifact[]>(`/generated_artifacts?project_id=${projectId}`),
+        apiRequest<Approval[]>(`/projects/${projectId}/approvals`).catch(() => [] as Approval[]),
+      ]);
       if (requestProjectIdRef.current === projectId) {
         const normalized: Artifact[] = (data || []).map((a) => ({
           ...a,
           content: typeof a.content === 'string' ? a.content : JSON.stringify(a.content),
         }));
         setArtifacts(normalized);
+        setApprovals(approvalsData || []);
       }
     } catch (e) {
       if (requestProjectIdRef.current === projectId) {
@@ -108,6 +120,7 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
   useEffect(() => {
     requestProjectIdRef.current = projectId;
     setArtifacts([]);
+    setApprovals([]);
   }, [projectId]);
 
   useEffect(() => {
@@ -154,10 +167,18 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
 
   const getApprovalStatus = useCallback(
     (type: ArtifactType): string | null => {
-      const artifact = artifacts.find((a) => a.artifact_type === type);
-      return artifact?.approval_status || null;
+      // Approvals live in their own table (Approval.artifact_type), not as a
+      // field on GeneratedArtifact — the backend response for
+      // /generated_artifacts never carries approval_status. Same
+      // latest-wins tie-break as latestByType: an artifact_type can accrue
+      // more than one Approval row over a project's lifetime (e.g. a reject
+      // + resubmit), so take the highest id, not the first.
+      const matches = approvals.filter((a) => a.artifact_type === type);
+      if (matches.length === 0) return null;
+      const latest = matches.reduce((acc, a) => (Number(a.id) > Number(acc.id) ? a : acc));
+      return latest.status || null;
     },
-    [artifacts]
+    [approvals]
   );
 
   const isApproved = useCallback(
@@ -323,6 +344,7 @@ export function useUnifiedArtifacts(projectId: string | null): UseUnifiedArtifac
       wireframes: (data.wireframes as UIUXDesignContent['wireframes']) || [],
       componentRecommendations: (data.componentRecommendations as UIUXDesignContent['componentRecommendations']) || [],
       uxRecommendations: (data.uxRecommendations as string[]) || [],
+      designSystem: (data.designSystem as UIUXDesignContent['designSystem']) || null,
       styleOptions: (data.styleOptions as UIUXDesignContent['styleOptions']) || [],
     };
   }, [getArtifact]);

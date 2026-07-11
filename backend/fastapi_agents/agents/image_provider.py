@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
+from ..logging_config import get_logger
 import os
 import time
 import urllib.error
@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-logger = logging.getLogger("sdlc.image_provider")
+logger = get_logger("sdlc.image_provider")
 
 _DEMO_KEY_SENTINEL = "demo-placeholder"
 

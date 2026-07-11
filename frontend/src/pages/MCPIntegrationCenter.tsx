@@ -13,12 +13,23 @@ import {
   AlertTriangle,
   Clock,
   Link2,
-  Settings,
+  Trash2,
   Activity,
   XCircle,
+  X,
 } from 'lucide-react';
 import { Card, StatusBadge } from '../components/ui/Card';
 import { apiRequest } from '../lib/api';
+
+const INTEGRATION_TYPES = [
+  'version-control',
+  'issue-tracking',
+  'cloud-infrastructure',
+  'documentation',
+  'database',
+  'it-service-management',
+  'other',
+];
 
 type MCPIntegration = {
   id: number;
@@ -45,6 +56,11 @@ export function MCPIntegrationCenter() {
   const [integrations, setIntegrations] = useState<MCPIntegration[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState<number | null>(null);
+  const [removing, setRemoving] = useState<number | null>(null);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [addForm, setAddForm] = useState({ name: '', type: INTEGRATION_TYPES[0], url: '' });
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
 
   const loadIntegrations = async () => {
     setLoading(true);
@@ -72,6 +88,44 @@ export function MCPIntegrationCenter() {
     }
   };
 
+  const handleAddIntegration = async () => {
+    if (!addForm.name.trim()) { setAddError('Name is required.'); return; }
+    setAdding(true);
+    setAddError(null);
+    try {
+      await apiRequest('/mcp/integrations', {
+        method: 'POST',
+        body: {
+          name: addForm.name.trim(),
+          type: addForm.type,
+          config: addForm.url.trim() ? { url: addForm.url.trim() } : {},
+          connected_agents: [],
+          enabled: true,
+        },
+      });
+      setShowAddModal(false);
+      setAddForm({ name: '', type: INTEGRATION_TYPES[0], url: '' });
+      await loadIntegrations();
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : 'Failed to add integration');
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleRemove = async (id: number) => {
+    setRemoving(id);
+    try {
+      await apiRequest(`/mcp/integrations/${id}`, { method: 'DELETE' });
+      if (selectedIntegration === id) setSelectedIntegration(null);
+      await loadIntegrations();
+    } catch {
+      // ignore
+    } finally {
+      setRemoving(null);
+    }
+  };
+
   const connectedCount = integrations.filter((i) => i.status === 'connected').length;
   const errorCount = integrations.filter((i) => i.status === 'error').length;
   const syncingCount = integrations.filter((i) => i.status === 'syncing').length;
@@ -90,7 +144,7 @@ export function MCPIntegrationCenter() {
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh All
           </button>
-          <button className="btn-secondary text-sm">
+          <button onClick={() => setShowAddModal(true)} className="btn-secondary text-sm">
             <Link2 className="mr-2 h-4 w-4" />
             Add Integration
           </button>
@@ -128,6 +182,15 @@ export function MCPIntegrationCenter() {
               <div className="py-10 text-center text-text-muted">
                 <RefreshCw className="h-8 w-8 animate-spin mx-auto mb-2 text-ey-yellow" />
                 Loading integrations…
+              </div>
+            ) : integrations.length === 0 ? (
+              <div className="py-10 text-center">
+                <Cable className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+                <p className="text-sm text-text-muted">No integrations configured yet.</p>
+                <button onClick={() => setShowAddModal(true)} className="btn-primary text-sm mt-4">
+                  <Link2 className="mr-2 h-4 w-4" />
+                  Add Integration
+                </button>
               </div>
             ) : (
               <div className="grid gap-4 md:grid-cols-2">
@@ -241,9 +304,13 @@ export function MCPIntegrationCenter() {
                     <RefreshCw className="mr-2 h-4 w-4" />
                     Re-sync
                   </button>
-                  <button className="btn-secondary text-sm">
-                    <Settings className="mr-2 h-4 w-4" />
-                    Configure
+                  <button
+                    onClick={() => handleRemove(selectedDetails.id)}
+                    disabled={removing === selectedDetails.id}
+                    className="btn-secondary text-sm text-status-error disabled:opacity-50"
+                  >
+                    {removing === selectedDetails.id ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
+                    Remove
                   </button>
                 </div>
               </div>
@@ -302,6 +369,67 @@ export function MCPIntegrationCenter() {
           </Card>
         </div>
       </div>
+
+      {/* Add Integration modal — wired to the real POST /mcp/integrations
+          endpoint. The URL field is stored in `config.url`, which the
+          backend's Sync Now action uses for a genuine connectivity check. */}
+      {showAddModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-dark-bg/80 backdrop-blur-sm"
+          onClick={() => setShowAddModal(false)}
+        >
+          <div
+            className="bg-dark-card border border-dark-border rounded-lg w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-dark-border p-4">
+              <h3 className="text-lg font-semibold text-text-primary">Add Integration</h3>
+              <button onClick={() => setShowAddModal(false)} className="rounded-lg p-2 text-text-muted hover:bg-dark-bg hover:text-text-primary">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              {addError && <div className="text-xs text-status-error">{addError}</div>}
+              <div>
+                <label className="text-xs text-text-muted mb-1 block">Name</label>
+                <input
+                  className="input-field w-full text-sm"
+                  placeholder="e.g. GitHub"
+                  value={addForm.name}
+                  onChange={(e) => setAddForm({ ...addForm, name: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="text-xs text-text-muted mb-1 block">Type</label>
+                <select
+                  className="input-field w-full text-sm"
+                  value={addForm.type}
+                  onChange={(e) => setAddForm({ ...addForm, type: e.target.value })}
+                >
+                  {INTEGRATION_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-text-muted mb-1 block">URL (optional)</label>
+                <input
+                  className="input-field w-full text-sm"
+                  placeholder="https://api.example.com/health"
+                  value={addForm.url}
+                  onChange={(e) => setAddForm({ ...addForm, url: e.target.value })}
+                />
+                <p className="text-[10px] text-text-muted mt-1">If set, "Sync Now" performs a real connectivity check against this URL.</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-dark-border p-4">
+              <button onClick={() => setShowAddModal(false)} className="btn-ghost text-sm">Cancel</button>
+              <button onClick={handleAddIntegration} disabled={adding} className="btn-primary text-sm disabled:opacity-50">
+                {adding ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Link2 className="mr-2 h-4 w-4" />}
+                Add Integration
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -5,11 +5,11 @@
  * Provides a useToast hook and a ToastContainer component.
  */
 import { useState, useCallback, useEffect, createContext, useContext, type ReactNode } from 'react';
-import { CheckCircle2, AlertCircle, Loader2, X } from 'lucide-react';
+import { CheckCircle2, AlertCircle, Loader2, Info, X } from 'lucide-react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type ToastType = 'success' | 'error' | 'loading';
+export type ToastType = 'success' | 'error' | 'loading' | 'info';
 
 export interface Toast {
   id: string;
@@ -80,6 +80,8 @@ function ToastIcon({ type }: { type: ToastType }) {
       return <AlertCircle className="h-4 w-4 text-status-error" />;
     case 'loading':
       return <Loader2 className="h-4 w-4 text-ey-yellow animate-spin" />;
+    case 'info':
+      return <Info className="h-4 w-4 text-status-info" />;
   }
 }
 
@@ -89,6 +91,7 @@ const TOAST_BG: Record<ToastType, string> = {
   success: 'border-status-success/30 bg-status-success/10',
   error: 'border-status-error/30 bg-status-error/10',
   loading: 'border-ey-yellow/30 bg-ey-yellow/10',
+  info: 'border-status-info/30 bg-status-info/10',
 };
 
 // ─── Container ────────────────────────────────────────────────────────────────

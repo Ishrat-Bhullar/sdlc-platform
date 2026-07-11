@@ -1,366 +1,293 @@
-import { useState } from 'react';
-import { motion } from 'framer-motion';
+/**
+ * MonitoringCenter.tsx
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Platform Operations — real, cross-project orchestration visibility.
+ *
+ * This used to be a fully fabricated "system health" dashboard (fake CPU/
+ * memory/latency/cost numbers, a hardcoded mock alert feed). This platform's
+ * backend doesn't run its own APM, so there is no honest way to show host-
+ * level infra metrics. Instead, this page surfaces the real data the backend
+ * already tracks: agent-run status platform-wide (GET /dashboard/agents),
+ * summary counts (GET /dashboard/summary), and approval governance
+ * (GET /dashboard/governance). "Alerts" are real failed AgentRun rows, not
+ * fabricated severities.
+ */
+import { useEffect, useState, useCallback } from 'react';
 import {
   Activity,
-  Cpu,
-  HardDrive,
-  Network,
+  CheckCircle2,
   Clock,
   AlertTriangle,
-  CheckCircle2,
-  TrendingUp,
-  TrendingDown,
-  DollarSign,
-  Zap,
-  Users,
-  Server,
-  Bell,
-  BellOff,
+  FolderKanban,
+  FileCheck2,
+  RefreshCw,
+  Bot,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar, PreviewBadge } from '../components/ui/Card';
-import { mockAlerts } from '../data/mockData';
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  AreaChart,
-  Area,
-} from 'recharts';
+import { Card, StatusBadge } from '../components/ui/Card';
+import { apiRequest } from '../lib/api';
 
-const availabilityData = [
-  { time: '00:00', value: 99.9 },
-  { time: '04:00', value: 99.8 },
-  { time: '08:00', value: 99.9 },
-  { time: '12:00', value: 99.7 },
-  { time: '16:00', value: 99.9 },
-  { time: '20:00', value: 100 },
-  { time: '24:00', value: 99.9 },
-];
+interface DashboardSummary {
+  total_projects: number;
+  active_projects: number;
+  completed_projects: number;
+  total_agent_runs: number;
+  running_agents: number;
+  completed_agents: number;
+  failed_agents: number;
+  pending_approvals: number;
+  total_artifacts: number;
+  total_documents: number;
+}
 
-const latencyData = [
-  { time: '00:00', api: 45, db: 12 },
-  { time: '04:00', api: 52, db: 15 },
-  { time: '08:00', api: 68, db: 18 },
-  { time: '12:00', api: 85, db: 22 },
-  { time: '16:00', api: 62, db: 16 },
-  { time: '20:00', api: 48, db: 13 },
-  { time: '24:00', api: 42, db: 11 },
-];
+interface DashboardAgentRun {
+  id: number;
+  project_id: number;
+  agent_name: string;
+  status: string;
+  start_time: string | null;
+  end_time: string | null;
+  output_url: string | null;
+}
+
+interface DashboardGovernance {
+  total_approvals: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+  published: number;
+  recent: Array<{ id: number; project_id: number; artifact_type: string; status: string; comments: string | null }>;
+}
+
+interface ProjectSummary {
+  id: number;
+  name: string;
+}
+
+function formatRelativeTime(iso: string | null): string {
+  if (!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60000) return 'just now';
+  if (ms < 3600000) return `${Math.round(ms / 60000)}m ago`;
+  if (ms < 86400000) return `${Math.round(ms / 3600000)}h ago`;
+  return `${Math.round(ms / 86400000)}d ago`;
+}
+
+function agentLabel(name: string): string {
+  return name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 export function MonitoringCenter() {
-  const [alertFilter, setAlertFilter] = useState<'all' | 'critical' | 'warning' | 'info'>('all');
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [agentRuns, setAgentRuns] = useState<DashboardAgentRun[]>([]);
+  const [governance, setGovernance] = useState<DashboardGovernance | null>(null);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const filteredAlerts = mockAlerts.filter((a) =>
-    alertFilter === 'all' ? true : a.severity === alertFilter
-  );
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [summaryRes, agentsRes, govRes, projectsRes] = await Promise.all([
+        apiRequest<DashboardSummary>('/dashboard/summary'),
+        apiRequest<DashboardAgentRun[]>('/dashboard/agents'),
+        apiRequest<DashboardGovernance>('/dashboard/governance'),
+        apiRequest<ProjectSummary[]>('/dashboard/projects'),
+      ]);
+      setSummary(summaryRes);
+      setAgentRuns(agentsRes || []);
+      setGovernance(govRes);
+      setProjects(projectsRes || []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load platform operations data');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  const criticalAlerts = mockAlerts.filter((a) => a.severity === 'critical' && !a.acknowledged).length;
-  const warningAlerts = mockAlerts.filter((a) => a.severity === 'warning' && !a.acknowledged).length;
+  useEffect(() => { load(); }, [load]);
+
+  const projectName = (id: number) => projects.find((p) => p.id === id)?.name || `Project #${id}`;
+
+  const failedRuns = agentRuns.filter((r) => r.status === 'failed');
+  const recentRuns = [...agentRuns].sort((a, b) => b.id - a.id).slice(0, 15);
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-text-primary">Monitoring Center</h1>
-            <PreviewBadge />
-          </div>
-          <p className="mt-1 text-sm text-text-muted">System health, metrics, and alerting — showcasing planned functionality with sample data</p>
+          <h1 className="text-2xl font-bold text-text-primary">Platform Operations</h1>
+          <p className="mt-1 text-sm text-text-muted">Real-time agent execution and approval governance across all projects</p>
         </div>
         <div className="flex items-center gap-3">
-          {criticalAlerts > 0 && (
+          {failedRuns.length > 0 && (
             <StatusBadge status="error">
               <AlertTriangle className="mr-1 h-3 w-3" />
-              {criticalAlerts} Critical
+              {failedRuns.length} Failed Run{failedRuns.length === 1 ? '' : 's'}
             </StatusBadge>
           )}
-          {warningAlerts > 0 && (
-            <StatusBadge status="warning">
-              <Bell className="mr-1 h-3 w-3" />
-              {warningAlerts} Warnings
+          {summary && (
+            <StatusBadge status="success">
+              <CheckCircle2 className="mr-1 h-3 w-3" />
+              {summary.completed_agents} Completed
             </StatusBadge>
           )}
-          <StatusBadge status="success">
-            <CheckCircle2 className="mr-1 h-3 w-3" />
-            99.9% Uptime
-          </StatusBadge>
+          <button onClick={load} className="btn-ghost text-sm" disabled={loading}>
+            <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
         </div>
       </div>
 
-      {/* Key Metrics */}
+      {error && (
+        <Card className="border-status-error/30 bg-status-error/5 text-sm text-status-error">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4" />
+            {error}
+            <button onClick={load} className="ml-auto underline hover:no-underline">Retry</button>
+          </div>
+        </Card>
+      )}
+
+      {/* Key Metrics — all real, from GET /dashboard/summary */}
       <div className="grid gap-4 md:grid-cols-6">
         <Card className="text-center">
-          <Activity className="h-5 w-5 text-status-success mx-auto mb-2" />
-          <p className="text-xl font-bold text-status-success">99.9%</p>
-          <p className="text-[10px] text-text-muted">Availability</p>
+          <FolderKanban className="h-5 w-5 text-ey-yellow mx-auto mb-2" />
+          <p className="text-xl font-bold text-text-primary">{summary?.total_projects ?? '—'}</p>
+          <p className="text-[10px] text-text-muted">Projects</p>
         </Card>
         <Card className="text-center">
-          <Clock className="h-5 w-5 text-ey-yellow mx-auto mb-2" />
-          <p className="text-xl font-bold text-text-primary">58ms</p>
-          <p className="text-[10px] text-text-muted">Avg Latency</p>
+          <Activity className="h-5 w-5 text-status-info mx-auto mb-2" />
+          <p className="text-xl font-bold text-status-info">{summary?.running_agents ?? '—'}</p>
+          <p className="text-[10px] text-text-muted">Running Agents</p>
         </Card>
         <Card className="text-center">
-          <Network className="h-5 w-5 text-status-info mx-auto mb-2" />
-          <p className="text-xl font-bold text-text-primary">12.4K</p>
-          <p className="text-[10px] text-text-muted">Req/min</p>
+          <CheckCircle2 className="h-5 w-5 text-status-success mx-auto mb-2" />
+          <p className="text-xl font-bold text-status-success">{summary?.completed_agents ?? '—'}</p>
+          <p className="text-[10px] text-text-muted">Completed Runs</p>
         </Card>
         <Card className="text-center">
-          <AlertTriangle className="h-5 w-5 text-status-warning mx-auto mb-2" />
-          <p className="text-xl font-bold text-status-warning">0.2%</p>
-          <p className="text-[10px] text-text-muted">Error Rate</p>
+          <AlertTriangle className="h-5 w-5 text-status-error mx-auto mb-2" />
+          <p className="text-xl font-bold text-status-error">{summary?.failed_agents ?? '—'}</p>
+          <p className="text-[10px] text-text-muted">Failed Runs</p>
         </Card>
         <Card className="text-center">
-          <DollarSign className="h-5 w-5 text-ey-yellow mx-auto mb-2" />
-          <p className="text-xl font-bold text-ey-yellow">$892</p>
-          <p className="text-[10px] text-text-muted">Infra Cost</p>
+          <Clock className="h-5 w-5 text-status-warning mx-auto mb-2" />
+          <p className="text-xl font-bold text-status-warning">{summary?.pending_approvals ?? '—'}</p>
+          <p className="text-[10px] text-text-muted">Pending Approvals</p>
         </Card>
         <Card className="text-center">
-          <Zap className="h-5 w-5 text-status-info mx-auto mb-2" />
-          <p className="text-xl font-bold text-text-primary">2.4M</p>
-          <p className="text-[10px] text-text-muted">Tokens Used</p>
+          <FileCheck2 className="h-5 w-5 text-ey-yellow mx-auto mb-2" />
+          <p className="text-xl font-bold text-text-primary">{summary?.total_artifacts ?? '—'}</p>
+          <p className="text-[10px] text-text-muted">Artifacts Generated</p>
         </Card>
       </div>
 
-      {/* Charts Row */}
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Availability Chart */}
-        <Card>
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="section-title mb-0">System Availability</h3>
-            <span className="text-xs text-text-muted">Last 24 hours</span>
-          </div>
-          <div className="h-48">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={availabilityData}>
-                <defs>
-                  <linearGradient id="colorAvailability" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#FFE600" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#FFE600" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#222" />
-                <XAxis dataKey="time" stroke="#64748B" fontSize={10} />
-                <YAxis domain={[99, 100]} stroke="#64748B" fontSize={10} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#111',
-                    border: '1px solid #222',
-                    borderRadius: '8px',
-                    color: '#E2E8F0',
-                  }}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="value"
-                  stroke="#FFE600"
-                  fillOpacity={1}
-                  fill="url(#colorAvailability)"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-
-        {/* Latency Chart */}
-        <Card>
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="section-title mb-0">API & Database Latency</h3>
-            <span className="text-xs text-text-muted">Last 24 hours</span>
-          </div>
-          <div className="h-48">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={latencyData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#222" />
-                <XAxis dataKey="time" stroke="#64748B" fontSize={10} />
-                <YAxis stroke="#64748B" fontSize={10} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#111',
-                    border: '1px solid #222',
-                    borderRadius: '8px',
-                    color: '#E2E8F0',
-                  }}
-                />
-                <Line type="monotone" dataKey="api" stroke="#3B82F6" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="db" stroke="#22C55E" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="flex justify-center gap-6 mt-2">
-            <span className="text-xs text-status-info flex items-center gap-1">
-              <span className="h-2 w-2 rounded-full bg-status-info" />
-              API Latency
-            </span>
-            <span className="text-xs text-status-success flex items-center gap-1">
-              <span className="h-2 w-2 rounded-full bg-status-success" />
-              DB Latency
-            </span>
-          </div>
-        </Card>
-      </div>
-
-      {/* Resources & Alerts Row */}
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Resource Usage */}
-        <Card>
-          <h3 className="section-title">Resource Usage</h3>
-          <div className="space-y-4">
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <Cpu className="h-4 w-4 text-ey-yellow" />
-                  <span className="text-xs text-text-primary">CPU Usage</span>
-                </div>
-                <span className="text-xs text-text-primary">42%</span>
-              </div>
-              <ProgressBar value={42} color="yellow" />
-            </div>
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <HardDrive className="h-4 w-4 text-status-info" />
-                  <span className="text-xs text-text-primary">Memory</span>
-                </div>
-                <span className="text-xs text-text-primary">68%</span>
-              </div>
-              <ProgressBar value={68} color="blue" />
-            </div>
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <Network className="h-4 w-4 text-status-success" />
-                  <span className="text-xs text-text-primary">Network I/O</span>
-                </div>
-                <span className="text-xs text-text-primary">23%</span>
-              </div>
-              <ProgressBar value={23} color="green" />
-            </div>
+        {/* Recent Agent Activity — real GET /dashboard/agents rows */}
+        <Card className="lg:col-span-2">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="section-title mb-0">Recent Agent Activity</h3>
+            <span className="text-xs text-text-muted">Across all projects</span>
           </div>
+          {recentRuns.length === 0 ? (
+            <p className="text-xs text-text-muted py-8 text-center">No agent runs recorded yet.</p>
+          ) : (
+            <div className="space-y-2 max-h-[420px] overflow-y-auto">
+              {recentRuns.map((run) => (
+                <div key={run.id} className="flex items-center gap-3 rounded-lg bg-dark-bg p-3">
+                  <Bot className={`h-4 w-4 flex-shrink-0 ${
+                    run.status === 'completed' ? 'text-status-success'
+                    : run.status === 'running' ? 'text-status-info'
+                    : run.status === 'failed' ? 'text-status-error'
+                    : 'text-text-muted'
+                  }`} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-text-primary truncate">{agentLabel(run.agent_name)}</p>
+                    <p className="text-[10px] text-text-muted truncate">{projectName(run.project_id)} · {formatRelativeTime(run.end_time || run.start_time)}</p>
+                  </div>
+                  <StatusBadge status={
+                    run.status === 'completed' ? 'success'
+                    : run.status === 'running' ? 'running'
+                    : run.status === 'failed' ? 'error'
+                    : 'idle'
+                  }>
+                    {run.status}
+                  </StatusBadge>
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
 
-        {/* Cost Optimization */}
+        {/* Approval Governance — real GET /dashboard/governance */}
         <Card>
-          <h3 className="section-title">Cost Optimization</h3>
-          <div className="space-y-3">
-            <div className="flex items-center justify-between rounded-lg bg-dark-bg p-3">
-              <span className="text-xs text-text-muted">Output Velocity</span>
-              <span className="text-sm font-semibold text-status-success flex items-center gap-1">
-                <TrendingUp className="h-3 w-3" />
-                +12%
-              </span>
-            </div>
-            <div className="flex items-center justify-between rounded-lg bg-dark-bg p-3">
-              <span className="text-xs text-text-muted">Token Burn Rate</span>
-              <span className="text-sm font-semibold text-status-warning flex items-center gap-1">
-                <TrendingDown className="h-3 w-3" />
-                -5%
-              </span>
-            </div>
-            <div className="flex items-center justify-between rounded-lg bg-dark-bg p-3">
-              <span className="text-xs text-text-muted">Model Efficiency</span>
-              <span className="text-sm font-semibold text-ey-yellow">89%</span>
-            </div>
-            <div className="flex items-center justify-between rounded-lg bg-dark-bg p-3">
-              <span className="text-xs text-text-muted">Cost Savings</span>
-              <span className="text-sm font-semibold text-status-success">$234/mo</span>
-            </div>
-          </div>
-        </Card>
-
-        {/* Active Users & System Health */}
-        <Card>
-          <h3 className="section-title">System Status</h3>
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-text-muted">Active Users</span>
-              <span className="text-sm text-text-primary flex items-center gap-1">
-                <Users className="h-3 w-3" />
-                145
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-text-muted">Running Agents</span>
-              <span className="text-sm text-text-primary flex items-center gap-1">
-                <Server className="h-3 w-3" />
-                3
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-text-muted">Security Status</span>
-              <StatusBadge status="success">Protected</StatusBadge>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-text-muted">Compliance</span>
-              <StatusBadge status="success">Active</StatusBadge>
-            </div>
-          </div>
-          <div className="mt-4 pt-4 border-t border-dark-border">
-            <p className="text-[10px] text-text-muted">Next maintenance window</p>
-            <p className="text-xs text-text-primary mt-1">Sunday 02:00 - 04:00 UTC</p>
-          </div>
+          <h3 className="section-title">Approval Governance</h3>
+          {governance ? (
+            <>
+              <div className="space-y-2 mb-4">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-text-muted">Pending</span>
+                  <span className="text-status-warning font-medium">{governance.pending}</span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-text-muted">Approved</span>
+                  <span className="text-status-success font-medium">{governance.approved}</span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-text-muted">Rejected</span>
+                  <span className="text-status-error font-medium">{governance.rejected}</span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-text-muted">Published</span>
+                  <span className="text-text-primary font-medium">{governance.published}</span>
+                </div>
+              </div>
+              <div className="pt-3 border-t border-dark-border">
+                <p className="text-[10px] text-text-muted uppercase tracking-wide mb-2">Recent decisions</p>
+                {governance.recent.length === 0 ? (
+                  <p className="text-xs text-text-muted">No approvals recorded yet.</p>
+                ) : (
+                  <div className="space-y-2 max-h-[220px] overflow-y-auto">
+                    {governance.recent.map((a) => (
+                      <div key={a.id} className="text-xs">
+                        <p className="text-text-primary">{a.artifact_type.replace(/_/g, ' ')}</p>
+                        <p className="text-[10px] text-text-muted">{projectName(a.project_id)} · {a.status}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <p className="text-xs text-text-muted">Loading…</p>
+          )}
         </Card>
       </div>
 
-      {/* Alerts */}
+      {/* Failed runs — real alerts, no fabricated severities */}
       <Card>
         <div className="flex items-center justify-between mb-4">
-          <h3 className="section-title mb-0">Active Alerts</h3>
-          <div className="flex gap-2">
-            {(['all', 'critical', 'warning', 'info'] as const).map((f) => (
-              <button
-                key={f}
-                onClick={() => setAlertFilter(f)}
-                className={`px-3 py-1 text-xs rounded-lg transition-colors ${
-                  alertFilter === f
-                    ? 'bg-ey-yellow/20 text-ey-yellow'
-                    : 'text-text-muted hover:text-text-primary'
-                }`}
-              >
-                {f.charAt(0).toUpperCase() + f.slice(1)}
-              </button>
+          <h3 className="section-title mb-0">Failed Runs</h3>
+          <span className="text-xs text-text-muted">{failedRuns.length} total</span>
+        </div>
+        {failedRuns.length === 0 ? (
+          <p className="text-xs text-text-muted py-8 text-center">No failed agent runs — everything is healthy.</p>
+        ) : (
+          <div className="space-y-2 max-h-64 overflow-y-auto">
+            {failedRuns.map((run) => (
+              <div key={run.id} className="flex items-center gap-4 rounded-lg p-3 bg-status-error/5 border border-status-error/20">
+                <AlertTriangle className="h-5 w-5 text-status-error flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-text-primary">{agentLabel(run.agent_name)} failed — {projectName(run.project_id)}</p>
+                  <p className="text-[10px] text-text-muted mt-0.5 truncate">{run.output_url || 'No error detail recorded'}</p>
+                </div>
+                <span className="text-[10px] text-text-muted flex-shrink-0">{formatRelativeTime(run.end_time || run.start_time)}</span>
+              </div>
             ))}
           </div>
-        </div>
-        <div className="space-y-2 max-h-48 overflow-y-auto">
-          {filteredAlerts.map((alert) => (
-            <motion.div
-              key={alert.id}
-              initial={{ opacity: 0, x: -10 }}
-              animate={{ opacity: 1, x: 0 }}
-              className={`flex items-center gap-4 rounded-lg p-3 ${
-                alert.severity === 'critical' ? 'bg-status-error/5 border border-status-error/20' :
-                alert.severity === 'warning' ? 'bg-status-warning/5 border border-status-warning/20' :
-                'bg-dark-bg border border-dark-border'
-              }`}
-            >
-              {alert.severity === 'critical' && <AlertTriangle className="h-5 w-5 text-status-error" />}
-              {alert.severity === 'warning' && <AlertTriangle className="h-5 w-5 text-status-warning" />}
-              {alert.severity === 'info' && <Activity className="h-5 w-5 text-status-info" />}
-              <div className="flex-1">
-                <p className="text-sm text-text-primary">{alert.message}</p>
-<p className="text-[10px] text-text-muted mt-0.5">
-                  {alert.source} | {(() => {
-                    const ts = new Date(alert.timestamp);
-                    return isNaN(ts.getTime()) ? '-' : ts.toLocaleTimeString();
-                  })()}
-                </p>
-              </div>
-              {alert.acknowledged ? (
-                <CheckCircle2 className="h-4 w-4 text-text-muted" />
-              ) : (
-                <button className="btn-ghost text-xs">
-                  <BellOff className="mr-1 h-3 w-3" />
-                  Acknowledge
-                </button>
-              )}
-            </motion.div>
-          ))}
-        </div>
+        )}
       </Card>
     </div>
   );

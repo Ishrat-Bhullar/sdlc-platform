@@ -1,10 +1,8 @@
 import { useState } from 'react';
-import { motion } from 'framer-motion';
 import {
   Code2,
   FileCode,
   FolderTree,
-  Download,
   FileJson,
   FileType,
   CheckCircle2,
@@ -13,8 +11,9 @@ import {
   Copy,
   Eye,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar, PreviewBadge } from '../components/ui/Card';
+import { Card, StatusBadge } from '../components/ui/Card';
 import { Accordion, AccordionItem, BulletList, DataTable } from '../components/ui/Accordion';
+import { RegenerateButton } from '../components/ui/RegenerateButton';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
 import type { CodeFile } from '../types/unified';
@@ -24,7 +23,7 @@ export function FrontendWorkspace() {
   const [activeTab, setActiveTab] = useState<'overview' | 'files' | 'structure' | 'architecture'>('overview');
   const [selectedFile, setSelectedFile] = useState<CodeFile | null>(null);
   const projectId = getSelectedProjectId();
-  const { getGeneratedCode, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
+  const { getGeneratedCode, loading, error, reload } = useUnifiedArtifacts(projectId);
 
   const frontendCode = getGeneratedCode('frontend');
 
@@ -92,12 +91,21 @@ export function FrontendWorkspace() {
       <div className="space-y-6">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold text-text-primary">Frontend Workspace</h1>
-          <PreviewBadge label="Preview — Agent Under Development" />
         </div>
-        <Card className="py-10 text-center">
+        <Card className="py-10 text-center space-y-3">
           <Code2 className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
           <p className="text-sm text-text-muted">No frontend code generated yet.</p>
           <p className="text-xs text-text-muted mt-1">Run the Frontend Agent to generate React components and pages.</p>
+          {projectId && (
+            <RegenerateButton
+              projectId={projectId}
+              agentName="Frontend Agent"
+              onRegenerated={reload}
+              label="Generate"
+              className="btn-primary text-sm"
+              align="center"
+            />
+          )}
         </Card>
       </div>
     );
@@ -110,6 +118,8 @@ export function FrontendWorkspace() {
     { label: 'Lines', value: frontendCode.files?.reduce((acc, f) => acc + (f.content?.split('\n').length || 0), 0) || 0, icon: Code2, color: 'text-ey-yellow' },
   ];
 
+  const hasFiles = (frontendCode.files?.length ?? 0) > 0;
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -117,15 +127,24 @@ export function FrontendWorkspace() {
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold text-text-primary">Frontend Workspace</h1>
-            <PreviewBadge label="Preview — Agent Under Development" />
           </div>
           <p className="mt-1 text-sm text-text-muted">React components, pages, and application code</p>
         </div>
         <div className="flex items-center gap-2">
-          <StatusBadge status="success">
-            <CheckCircle2 className="mr-1 h-3 w-3" />
-            Code Generated
-          </StatusBadge>
+          {hasFiles ? (
+            <StatusBadge status="success">
+              <CheckCircle2 className="mr-1 h-3 w-3" />
+              Code Generated
+            </StatusBadge>
+          ) : (
+            <StatusBadge status="error">
+              <AlertTriangle className="mr-1 h-3 w-3" />
+              Generation Failed
+            </StatusBadge>
+          )}
+          {projectId && (
+            <RegenerateButton projectId={projectId} agentName="Frontend Agent" onRegenerated={reload} />
+          )}
           <button onClick={reload} className="btn-ghost text-sm" disabled={loading}>
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh

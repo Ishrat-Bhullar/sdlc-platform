@@ -30,10 +30,25 @@ interface LivePreviewFrameProps {
 // in the iframe script below (see FORM_POLYFILL) — just enough of its API
 // (register/handleSubmit/errors) for a generated form to render and submit
 // in the sandbox, not a faithful reimplementation.
-const ALLOWED_IMPORT_SPECIFIERS = new Set(['react', 'react-dom', 'axios', 'react-hook-form']);
+//
+// recharts is included for chart-bearing generated apps (weather trends,
+// banking/spend dashboards, currency-rate history). Verified against this
+// exact sandbox (sandboxed iframe, UMD globals, no bundler) before wiring
+// in — two real constraints apply, both enforced in the prompt that tells
+// the LLM it's allowed to use this library (agents/frontend/prompts.py):
+//   1. prop-types MUST load before the recharts script tag, or the
+//      `Recharts` global itself never gets defined (verified: omitting it
+//      throws "Recharts is not defined", not a lazier prop-types warning).
+//   2. <ResponsiveContainer> renders nothing in this sandbox — its
+//      ResizeObserver-based measurement never resolves here (verified: 0
+//      SVG elements after render). Charts must use a fixed pixel
+//      width/height instead (verified working that way).
+const ALLOWED_IMPORT_SPECIFIERS = new Set(['react', 'react-dom', 'axios', 'react-hook-form', 'recharts']);
 const REACT_CDN = 'https://unpkg.com/react@18/umd/react.production.min.js';
 const REACT_DOM_CDN = 'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js';
 const AXIOS_CDN = 'https://unpkg.com/axios@1/dist/axios.min.js';
+const PROP_TYPES_CDN = 'https://unpkg.com/prop-types@15/prop-types.min.js';
+const RECHARTS_CDN = 'https://unpkg.com/recharts@2/umd/Recharts.js';
 
 // A minimal same-name shim for react-hook-form's `useForm()` — covers the
 // common pattern generated code uses (`register`, `handleSubmit`, `errors`/
@@ -199,6 +214,8 @@ export function LivePreviewFrame({ files }: LivePreviewFrameProps) {
 <script src="${REACT_CDN}"></script>
 <script src="${REACT_DOM_CDN}"></script>
 <script src="${AXIOS_CDN}"></script>
+<script src="${PROP_TYPES_CDN}"></script>
+<script src="${RECHARTS_CDN}"></script>
 </head><body>
 <div id="root"></div>
 <script>
@@ -207,6 +224,18 @@ window.onerror = function (message) {
 };
 try {
   const { useState, useEffect, useReducer, useMemo, useCallback, useRef, Fragment } = React;
+  // Destructured so named imports from 'recharts' (stripped by
+  // parseModuleSyntax like every other allowed specifier) resolve as plain
+  // identifiers in the transformed code below. ResponsiveContainer is
+  // intentionally included even though it doesn't render in this sandbox —
+  // omitting it would turn an LLM-generated ResponsiveContainer usage into a
+  // ReferenceError instead of a silently-empty chart area.
+  const {
+    LineChart, BarChart, AreaChart, PieChart, RadarChart,
+    Line, Bar, Area, Pie, Cell, Radar,
+    XAxis, YAxis, CartesianGrid, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
+    Tooltip, Legend, ResponsiveContainer,
+  } = Recharts;
   ${FORM_POLYFILL}
   ${transformed}
   const Entry = typeof ${entryName} !== 'undefined' ? ${entryName} : null;

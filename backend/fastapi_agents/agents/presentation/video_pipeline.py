@@ -16,7 +16,7 @@ completely unaffected.
 """
 from __future__ import annotations
 
-import logging
+from ...logging_config import get_logger
 import os
 from datetime import datetime
 from pathlib import Path
@@ -30,7 +30,7 @@ from ...services.video_generation_service import (
     VoiceConfig,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class VideoGenerationResult(BaseModel):

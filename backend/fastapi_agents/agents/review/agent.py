@@ -13,14 +13,14 @@ only an existing artefact to assess.
 """
 from __future__ import annotations
 
-import logging
+from ...logging_config import get_logger
 from typing import Any
 
 from ..llm_service import LLMService
 from .prompts import build_review_system_prompt
 from .schemas import ReviewOutcome
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class ReviewAgent:

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
+import time
 import traceback
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from .agents.developer_studio.agent import DeveloperStudioAgent
 from .agents.llm_service import LLMService
 from .agents.registry import AgentFactory
+from .logging_config import get_logger
 
 from .models import (
     AgentName,
@@ -37,7 +38,7 @@ from .models import (
 )
 from .ws_manager import manager
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 PIPELINE: list[str] = [
@@ -193,6 +194,14 @@ def _build_context(db: Session, project: Project, agent_name: str) -> str:
     # genuinely large-context provider is actually available.
     generous = LLMService(db=db, project_id=project.id).has_generous_context_path()
     per_artifact_limit = 6000 if generous else 3000
+    # selected_ui_style now carries a COMPLETE chosen design (its own
+    # screens/navigation/componentRecommendations/dataVisualizations, not
+    # just a theme) — it's the Frontend Agent's primary build spec, so it
+    # gets a larger budget than the generic per-artifact cap above rather
+    # than being truncated down to theme-only fidelity.
+    per_artifact_limit_overrides = {
+        "selected_ui_style": (14000 if generous else 9000),
+    }
 
     for art_type in prior_types:
         artifact = (
@@ -205,7 +214,8 @@ def _build_context(db: Session, project: Project, agent_name: str) -> str:
             .first()
         )
         if artifact:
-            content = artifact.content[:per_artifact_limit] if len(artifact.content) > per_artifact_limit else artifact.content
+            limit = per_artifact_limit_overrides.get(art_type, per_artifact_limit)
+            content = artifact.content[:limit] if len(artifact.content) > limit else artifact.content
             base += f"--- {art_type} ---\n{content}\n\n"
     return base.strip()
 
@@ -232,6 +242,10 @@ async def _execute_agent(db: Session, run: AgentRun, project: Project) -> None:
     run.status = RunStatus.RUNNING.value
     run.start_time = datetime.now(timezone.utc)
     db.commit()
+    logger.info(
+        "Agent started | project_id=%s agent=%s stage=%s",
+        project.id, run.agent_name, cfg["stage"],
+    )
     await manager.agent_started(project.id, {"agent_name": run.agent_name, "run_id": run.id})
 
     artifact_id: int | None = None
@@ -314,11 +328,23 @@ async def _execute_agent(db: Session, run: AgentRun, project: Project) -> None:
 
 
 async def _safe_execute(db: Session, run: AgentRun, project: Project) -> None:
+    cfg = _AGENT_CONFIG.get(run.agent_name, {})
+    stage = cfg.get("stage", run.agent_name)
+    start = time.monotonic()
     try:
         await _execute_agent(db, run, project)
+        elapsed = time.monotonic() - start
+        logger.info(
+            "Agent completed | project_id=%s agent=%s stage=%s duration=%.2fs",
+            project.id, run.agent_name, stage, elapsed,
+        )
     except Exception as exc:
+        elapsed = time.monotonic() - start
         tb = traceback.format_exc()
-        logger.error("[agent_runner] %s FAILED: %s\n%s", run.agent_name, exc, tb)
+        logger.error(
+            "Agent failed | project_id=%s agent=%s stage=%s duration=%.2fs error=%s\n%s",
+            project.id, run.agent_name, stage, elapsed, exc, tb,
+        )
         try:
             run.status = RunStatus.FAILED.value
             run.end_time = datetime.now(timezone.utc)
@@ -374,9 +400,12 @@ class PipelineExecutor:
 
     async def run(self, project_id: int) -> None:
         db: Session = next(get_db())
+        start = time.monotonic()
+        logger.info("Pipeline started | project_id=%s", project_id)
         try:
             project = db.get(Project, project_id)
             if project is None:
+                logger.warning("Pipeline aborted | project_id=%s reason=project_not_found", project_id)
                 return
 
             existing: dict[str, AgentRun] = {
@@ -566,6 +595,16 @@ class PipelineExecutor:
 
             project.status = "completed"
             db.commit()
+            elapsed = time.monotonic() - start
+            logger.info("Pipeline completed | project_id=%s duration=%.2fs", project_id, elapsed)
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            tb = traceback.format_exc()
+            logger.error(
+                "Pipeline failed | project_id=%s duration=%.2fs error=%s\n%s",
+                project_id, elapsed, exc, tb,
+            )
+            raise
         finally:
             db.close()
 

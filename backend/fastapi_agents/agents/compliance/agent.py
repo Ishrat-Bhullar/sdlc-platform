@@ -9,14 +9,14 @@ calls `.generate(...)`.
 from __future__ import annotations
 
 import json
-import logging
+from ...logging_config import get_logger
 from typing import Any
 
 from ..llm_service import LLMService
 from .prompts import COMPLIANCE_SYSTEM_PROMPT
 from .schemas import ComplianceArchitectureOutput
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------

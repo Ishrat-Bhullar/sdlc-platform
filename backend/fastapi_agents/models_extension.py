@@ -362,6 +362,16 @@ class ApprovalDecisionOut(BaseModel):
     approval_id: int
     new_status: str
     decided_at: datetime
+
+
+class SelectedDesignUpdateRequest(BaseModel):
+    # The full selected_ui_style object (same shape as one StyleOption),
+    # with the user's Design Canvas edits (component insert/remove/reorder/
+    # rename) already applied to its `screens`. Persisted as a new
+    # GeneratedArtifact version — same pattern as every other artifact
+    # write in this app — so it becomes what the Frontend Agent's context
+    # picks up on its next run.
+    design: dict
     decided_by: int
 
 

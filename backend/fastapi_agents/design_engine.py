@@ -24,13 +24,13 @@ callers always get back a complete, renderable deck.
 """
 from __future__ import annotations
 
-import logging
+from .logging_config import get_logger
 import re
 from typing import Any
 
 from . import theme_engine as TE
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Layout upgrade heuristics — turn generic "items"/"content" slides into the

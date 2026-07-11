@@ -8,14 +8,14 @@ orchestrator only ever calls `.generate(...)`.
 """
 from __future__ import annotations
 
-import logging
+from ...logging_config import get_logger
 from typing import Any
 
 from ..llm_service import LLMService
 from .prompts import TESTING_SYSTEM_PROMPT
 from .schemas import TestPlanOutput
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------
@@ -41,9 +41,10 @@ class TestingAgent:
     @classmethod
     def generate(cls, db, project_id: int, context: str) -> dict[str, Any]:
         """Orchestrator-facing entrypoint: `TestingAgent.generate(db, project_id, context)`.
-        Preserves the exact contract/behavior previously implemented inline in
-        ai_service.generate_testing (including that a failure falls back to
-        the static demo plan rather than raising, unlike most other agents)."""
+        On failure, raises AIGenerationError instead of returning a fake
+        passing test plan — the caller must never mark this run Completed
+        with fabricated results."""
+        from ...ai_service import AIGenerationError
         from ...models import DEMO_MODE
 
         if DEMO_MODE:
@@ -53,5 +54,5 @@ class TestingAgent:
             result = llm.generate_json(TESTING_SYSTEM_PROMPT, context, schema=TestPlanOutput)
             return result.model_dump()
         except Exception as exc:
-            logger.warning("[TestingAgent] generate failed: %s — falling back to static plan", exc)
-            return TESTING_DEMO_PLAN
+            logger.error("[TestingAgent] generate failed: %s", exc)
+            raise AIGenerationError(f"Testing generation failed: {exc}") from exc

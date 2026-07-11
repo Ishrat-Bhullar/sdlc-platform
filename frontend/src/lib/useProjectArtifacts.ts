@@ -95,13 +95,30 @@ export function useProjectArtifacts(projectId: string | null) {
     load();
   }, [load]);
 
+  // GET /generated_artifacts returns every row ever created for the project
+  // (an agent can be re-run any number of times, each run inserts a new row
+  // rather than overwriting the old one) — pick the latest by created_at
+  // (id as tiebreaker), not the first match, or a retry/resume can silently
+  // surface a stale earlier generation. Mirrors useUnifiedArtifacts.ts's
+  // latestByType.
+  function latestByType(type: string): RawArtifact | null {
+    const matches = artifacts.filter((a) => a.artifact_type === type);
+    if (matches.length === 0) return null;
+    return matches.reduce((latest, a) => {
+      const latestTime = Date.parse(latest.created_at) || 0;
+      const aTime = Date.parse(a.created_at) || 0;
+      if (aTime !== latestTime) return aTime > latestTime ? a : latest;
+      return Number(a.id) > Number(latest.id) ? a : latest;
+    });
+  }
+
   function getArtifact(type: string): Record<string, unknown> | null {
-    const match = artifacts.find((a) => a.artifact_type === type);
+    const match = latestByType(type);
     return match ? parseContent(match.content) : null;
   }
 
   function getRaw(type: string): RawArtifact | null {
-    return artifacts.find((a) => a.artifact_type === type) ?? null;
+    return latestByType(type);
   }
 
   return { artifacts, loading, error, getArtifact, getRaw, reload: load, parseContent };

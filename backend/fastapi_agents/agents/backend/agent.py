@@ -11,15 +11,14 @@ ai_service.py). Owns its own prompts (prompts.py) and schemas
 """
 from __future__ import annotations
 
-import json
-import logging
+from ...logging_config import get_logger
 from typing import Any
 
 from ..llm_service import LLMService
 from .prompts import API_GENERATION_PROMPT, BACKEND_SYSTEM_PROMPT
 from .schemas import ApiDesignResult, BackendPlanOutput
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------
@@ -103,32 +102,6 @@ paths:
 }
 
 
-def _reuse_prior_or_demo_plan(db, project_id: int, artifact_type: str, demo_plan: dict) -> dict:
-    """Mirrors FrontendAgent's reuse-on-total-failure fallback — see that
-    module's docstring for the full rationale."""
-    from ...models import GeneratedArtifact
-
-    try:
-        candidates = (
-            db.query(GeneratedArtifact)
-            .filter(GeneratedArtifact.project_id == project_id, GeneratedArtifact.artifact_type == artifact_type)
-            .order_by(GeneratedArtifact.created_at.desc())
-            .limit(20)
-            .all()
-        )
-        for prior in candidates:
-            parsed = json.loads(prior.content)
-            if parsed.get("files"):
-                logger.warning(
-                    "[BackendAgent] %s: all providers failed — reusing prior artifact #%s instead of an empty fallback",
-                    artifact_type, prior.id,
-                )
-                return parsed
-    except Exception:
-        logger.debug("[BackendAgent] could not inspect prior %s artifacts for reuse", artifact_type, exc_info=True)
-    return demo_plan
-
-
 class BackendAgent:
     def __init__(self, llm: LLMService | None = None, *, db=None, project_id: int | None = None):
         self.llm = llm or LLMService(db=db, project_id=project_id, role="architect")
@@ -146,10 +119,12 @@ class BackendAgent:
     @classmethod
     def generate(cls, db, project_id: int, context: str) -> dict[str, Any]:
         """Orchestrator-facing entrypoint: `BackendAgent.generate(db, project_id, context)`.
-        Preserves the exact contract/behavior previously implemented inline in
-        ai_service.generate_backend, including the DEMO_MODE fixture and the
-        reuse-prior-artifact-on-total-failure fallback."""
-        from ...models import DEMO_MODE, ArtifactType
+        On any failure (every provider exhausted, or the LLM response fails
+        schema validation), raises AIGenerationError instead of returning a
+        placeholder — a stage that didn't produce real files must be recorded
+        as Failed, never as Completed with empty output."""
+        from ...models import DEMO_MODE
+        from ...ai_service import AIGenerationError
 
         if DEMO_MODE:
             return BACKEND_DEMO_PLAN
@@ -158,8 +133,8 @@ class BackendAgent:
             result = llm.generate_json(BACKEND_SYSTEM_PROMPT, context, schema=BackendPlanOutput)
             return result.model_dump()
         except Exception as exc:
-            logger.warning("[BackendAgent] generate failed: %s — falling back to static plan", exc)
-            return _reuse_prior_or_demo_plan(db, project_id, ArtifactType.BACKEND_CODE.value, BACKEND_DEMO_PLAN)
+            logger.error("[BackendAgent] generate failed: %s", exc)
+            raise AIGenerationError(f"Backend generation failed: {exc}") from exc
 
     @classmethod
     def generate_api_design(cls, db, project_id: int, context: str) -> dict[str, Any]:

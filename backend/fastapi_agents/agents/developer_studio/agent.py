@@ -23,11 +23,11 @@ one of these in.
 from __future__ import annotations
 
 import asyncio
-import logging
+from ...logging_config import get_logger
 
 from ...ws_manager import manager
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def resolve_full_path(file: dict) -> str:

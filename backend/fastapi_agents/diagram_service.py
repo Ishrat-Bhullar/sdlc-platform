@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging
+from .logging_config import get_logger
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +12,7 @@ from .architect_diagram_tools import (
     render_plantuml_to_svg_png,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)

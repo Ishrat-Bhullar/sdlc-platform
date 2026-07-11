@@ -4,12 +4,7 @@ import {
   Bot,
   Activity,
   Clock,
-  Zap,
-  DollarSign,
-  Play,
-  Pause,
   RefreshCw,
-  Settings,
   ChevronRight,
   CheckCircle2,
   XCircle,
@@ -24,21 +19,17 @@ import {
   Server,
   TestTube,
   Shield,
-  Rocket,
+  FileCheck2,
   FileText,
   X,
-  History,
-  Package,
-  Code,
   Brain,
-  BookOpen,
+  AlertTriangle,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar, PreviewBadge } from '../components/ui/Card';
-import { mockAgents } from '../data/mockData';
-import type { Agent } from '../types';
+import { Card, StatusBadge } from '../components/ui/Card';
 import { apiRequest } from '../lib/api';
 import { getSelectedProjectId } from '../lib/projectContext';
 import { usePipelineUpdates } from '../hooks/usePipelineUpdates';
+import { friendlyErrorMessage } from '../lib/friendlyError';
 
 // Matches GET /projects/{id}/agent-runs exactly (backend/fastapi_agents/main_extension.py) —
 // RunStatus is "pending" | "running" | "completed" | "failed"; agent_name is the
@@ -60,14 +51,40 @@ function stageIcon(status: AgentRunStatus['status']) {
   return <Clock className="h-3.5 w-3.5 text-text-muted" />;
 }
 
-function PipelineCheckpointsCard() {
-  const [projectId] = useState(() => getSelectedProjectId());
+function agentIconFor(name: string) {
+  const n = name.toLowerCase();
+  if (n.includes('memory')) return Brain;
+  if (n.includes('requirement')) return FileSearch;
+  if (n.includes('business analyst')) return Briefcase;
+  if (n.includes('architect')) return Building2;
+  if (n.includes('database')) return Database;
+  if (n.includes('ui/ux') || n.includes('ui-ux')) return Monitor;
+  if (n.includes('security')) return Shield;
+  if (n.includes('compliance')) return FileCheck2;
+  if (n.includes('review')) return CheckCircle2;
+  if (n.includes('frontend')) return Monitor;
+  if (n.includes('backend')) return Server;
+  if (n.includes('testing')) return TestTube;
+  if (n.includes('documentation')) return FileText;
+  return Bot;
+}
+
+function formatDuration(start: string | null, end: string | null): string {
+  if (!start) return '—';
+  const startMs = new Date(start).getTime();
+  const endMs = end ? new Date(end).getTime() : Date.now();
+  const seconds = Math.max(0, Math.round((endMs - startMs) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+/** Shared real data source — GET /projects/{id}/agent-runs, kept live via
+ *  the same WebSocket pipeline-event stream Dashboard/DevelopmentStudio use. */
+function useAgentRuns(projectId: string | null) {
   const [runs, setRuns] = useState<AgentRunStatus[] | null>(null);
-  const [actionState, setActionState] = useState<'idle' | 'resuming' | 'restarting'>('idle');
-  const [actionError, setActionError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!projectId) return;
+    if (!projectId) { setRuns(null); return; }
     try {
       const data = await apiRequest<AgentRunStatus[]>(`/projects/${projectId}/agent-runs`);
       setRuns(data);
@@ -78,6 +95,14 @@ function PipelineCheckpointsCard() {
 
   useEffect(() => { load(); }, [load]);
   usePipelineUpdates(projectId, () => { load(); });
+
+  return { runs, load };
+}
+
+function PipelineCheckpointsCard({ runs, load }: { runs: AgentRunStatus[] | null; load: () => Promise<void> }) {
+  const [projectId] = useState(() => getSelectedProjectId());
+  const [actionState, setActionState] = useState<'idle' | 'resuming' | 'restarting'>('idle');
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const handleResume = async () => {
     if (!projectId) return;
@@ -184,443 +209,250 @@ function PipelineCheckpointsCard() {
   );
 }
 
-const workflowSequence = [
-  { name: 'Requirements', type: 'requirement', icon: FileSearch },
-  { name: 'Business Analyst', type: 'business-analyst', icon: Briefcase },
-  { name: 'Architect', type: 'architect', icon: Building2 },
-  { name: 'Database', type: 'database', icon: Database },
-  { name: 'Frontend', type: 'frontend', icon: Monitor },
-  { name: 'Backend', type: 'backend', icon: Server },
-  { name: 'Code Review', type: 'code-review', icon: Code },
-  { name: 'Testing', type: 'testing', icon: TestTube },
-  { name: 'Security', type: 'security', icon: Shield },
-  { name: 'Documentation', type: 'documentation', icon: FileText },
-  { name: 'DevOps', type: 'devops', icon: Rocket },
-  { name: 'Deployment', type: 'deployment', icon: Rocket },
-];
-
-const agentIcons: Record<string, React.ElementType> = {
-  'requirement': FileSearch,
-  'business-analyst': Briefcase,
-  'architect': Building2,
-  'database': Database,
-  'frontend': Monitor,
-  'backend': Server,
-  'code-review': Code,
-  'testing': TestTube,
-  'security': Shield,
-  'documentation': FileText,
-  'devops': Rocket,
-  'memory': Brain,
-  'knowledge': BookOpen,
-};
-
 export function AgentControlCenter() {
-  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
+  const [projectId] = useState(() => getSelectedProjectId());
+  const { runs, load } = useAgentRuns(projectId);
+  const [selectedRun, setSelectedRun] = useState<AgentRunStatus | null>(null);
+  const [restarting, setRestarting] = useState(false);
 
-  const activeAgents = mockAgents.filter((a) => a.status === 'running');
-  const waitingAgents = mockAgents.filter((a) => a.status === 'waiting');
+  const runList = runs || [];
+  const runningCount = runList.filter((r) => r.status === 'running').length;
+  const queuedCount = runList.filter((r) => r.status === 'pending').length;
+  const completedCount = runList.filter((r) => r.status === 'completed').length;
+  const failedCount = runList.filter((r) => r.status === 'failed').length;
 
-  const totalTokens = mockAgents.reduce((sum, a) => sum + a.tokens, 0);
-  const totalCost = mockAgents.reduce((sum, a) => sum + a.cost, 0);
-
-  const executionHistory = [
-    { id: 1, agent: 'Requirement Agent', action: 'Completed BRD analysis', time: '10:45', result: 'success' },
-    { id: 2, agent: 'Business Analyst Agent', action: 'Generated 124 user stories', time: '10:30', result: 'success' },
-    { id: 3, agent: 'Architect Agent', action: 'Started microservices design', time: '10:15', result: 'running' },
-    { id: 4, agent: 'Database Agent', action: 'Schema generation queued', time: '10:00', result: 'waiting' },
-    { id: 5, agent: 'Frontend Agent', action: 'Waiting for architecture approval', time: '09:45', result: 'waiting' },
-  ];
+  const handleRestartAgent = async (run: AgentRunStatus) => {
+    if (!projectId) return;
+    setRestarting(true);
+    try {
+      await apiRequest(`/agents/run?project_id=${projectId}&agent_name=${encodeURIComponent(run.agent_name)}`, { method: 'POST' });
+      await load();
+      setSelectedRun(null);
+    } catch (e) {
+      console.error('Failed to restart agent:', e);
+    } finally {
+      setRestarting(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-text-primary">Agent Control Center</h1>
-            <PreviewBadge />
-          </div>
-          <p className="mt-1 text-sm text-text-muted">Manage and monitor all AI agents — showcasing planned functionality with sample data</p>
+          <h1 className="text-2xl font-bold text-text-primary">Agent Control Center</h1>
+          <p className="mt-1 text-sm text-text-muted">Real-time orchestration status for the selected project's agent pipeline</p>
         </div>
         <div className="flex items-center gap-3">
-          <button className="btn-ghost text-sm">
+          <button onClick={load} className="btn-ghost text-sm">
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh Status
           </button>
-          <button className="btn-secondary text-sm">
-            <Settings className="mr-2 h-4 w-4" />
-            Configure Fleet
-          </button>
         </div>
       </div>
 
-      {/* Pipeline Checkpoints — real data, additive to the mock sections below */}
-      <PipelineCheckpointsCard />
+      {!projectId ? (
+        <Card className="py-10 text-center">
+          <AlertTriangle className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
+          <p className="text-sm font-medium text-text-primary">No project selected</p>
+          <p className="text-xs text-text-muted mt-1">Select a project in the Dashboard to view agent status.</p>
+        </Card>
+      ) : (
+        <>
+          {/* Pipeline Checkpoints */}
+          <PipelineCheckpointsCard runs={runs} load={load} />
 
-      {/* Top Metrics */}
-      <div className="grid gap-4 md:grid-cols-5">
-        <Card className="text-center">
-          <Bot className="h-6 w-6 text-ey-yellow mx-auto mb-2" />
-          <p className="text-2xl font-bold text-text-primary">{mockAgents.length}</p>
-          <p className="text-xs text-text-muted">Total Agents</p>
-        </Card>
-        <Card className="text-center">
-          <Activity className="h-6 w-6 text-status-info mx-auto mb-2" />
-          <p className="text-2xl font-bold text-status-info">{activeAgents.length}</p>
-          <p className="text-xs text-text-muted">Running</p>
-        </Card>
-        <Card className="text-center">
-          <Clock className="h-6 w-6 text-status-warning mx-auto mb-2" />
-          <p className="text-2xl font-bold text-status-warning">{waitingAgents.length}</p>
-          <p className="text-xs text-text-muted">Waiting</p>
-        </Card>
-        <Card className="text-center">
-          <Zap className="h-6 w-6 text-status-success mx-auto mb-2" />
-          <p className="text-2xl font-bold text-status-success">{totalTokens.toLocaleString()}</p>
-          <p className="text-xs text-text-muted">Tokens Used</p>
-        </Card>
-        <Card className="text-center">
-          <DollarSign className="h-6 w-6 text-ey-yellow mx-auto mb-2" />
-          <p className="text-2xl font-bold text-ey-yellow">${totalCost.toFixed(2)}</p>
-          <p className="text-xs text-text-muted">Total Cost</p>
-        </Card>
-      </div>
-
-      {/* Agent Fleet Table */}
-      <Card>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="section-title mb-0">Agent Fleet</h3>
-          <div className="flex items-center gap-2">
-            <button className="btn-ghost text-xs">
-              <Play className="mr-1 h-3 w-3" />
-              Start All
-            </button>
-            <button className="btn-ghost text-xs">
-              <Pause className="mr-1 h-3 w-3" />
-              Pause All
-            </button>
+          {/* Top Metrics — all real, derived from the same agent-runs rows */}
+          <div className="grid gap-4 md:grid-cols-4">
+            <Card className="text-center">
+              <Bot className="h-6 w-6 text-ey-yellow mx-auto mb-2" />
+              <p className="text-2xl font-bold text-text-primary">{runList.length}</p>
+              <p className="text-xs text-text-muted">Total Stages</p>
+            </Card>
+            <Card className="text-center">
+              <Activity className="h-6 w-6 text-status-info mx-auto mb-2" />
+              <p className="text-2xl font-bold text-status-info">{runningCount}</p>
+              <p className="text-xs text-text-muted">Running</p>
+            </Card>
+            <Card className="text-center">
+              <Clock className="h-6 w-6 text-status-warning mx-auto mb-2" />
+              <p className="text-2xl font-bold text-status-warning">{queuedCount}</p>
+              <p className="text-xs text-text-muted">Queued</p>
+            </Card>
+            <Card className="text-center">
+              <CheckCircle2 className="h-6 w-6 text-status-success mx-auto mb-2" />
+              <p className="text-2xl font-bold text-status-success">{completedCount}</p>
+              <p className="text-xs text-text-muted">Completed</p>
+            </Card>
           </div>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-dark-border">
-                <th className="text-left text-xs font-medium text-text-muted pb-3">Agent</th>
-                <th className="text-left text-xs font-medium text-text-muted pb-3">Status</th>
-                <th className="text-left text-xs font-medium text-text-muted pb-3">Task</th>
-                <th className="text-left text-xs font-medium text-text-muted pb-3">Progress</th>
-                <th className="text-left text-xs font-medium text-text-muted pb-3">Runtime</th>
-                <th className="text-left text-xs font-medium text-text-muted pb-3">Tokens</th>
-                <th className="text-left text-xs font-medium text-text-muted pb-3">Cost</th>
-                <th className="text-left text-xs font-medium text-text-muted pb-3">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {mockAgents.map((agent) => {
-                const Icon = agentIcons[agent.type] || Bot;
-                return (
-                  <tr
-                    key={agent.id}
-                    className="border-b border-dark-border/50 hover:bg-dark-cardHover cursor-pointer transition-colors"
-                    onClick={() => setSelectedAgent(agent)}
-                  >
-                    <td className="py-3">
-                      <div className="flex items-center gap-2">
-                        <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${
-                          agent.status === 'running' ? 'bg-status-info/10' :
-                          agent.status === 'completed' ? 'bg-status-success/10' :
-                          agent.status === 'waiting' ? 'bg-status-warning/10' :
-                          'bg-dark-bg'
-                        }`}>
-                          <Icon className={`h-4 w-4 ${
-                            agent.status === 'running' ? 'text-status-info' :
-                            agent.status === 'completed' ? 'text-status-success' :
-                            agent.status === 'waiting' ? 'text-status-warning' :
-                            'text-text-muted'
-                          }`} />
-                        </div>
-                        <span className="text-sm font-medium text-text-primary">{agent.name}</span>
-                      </div>
-                    </td>
-                    <td className="py-3">
-                      <StatusBadge status={
-                        agent.status === 'running' ? 'running' :
-                        agent.status === 'completed' ? 'success' :
-                        agent.status === 'waiting' ? 'pending' :
-                        agent.status === 'failed' ? 'error' : 'idle'
-                      }>
-                        {agent.status}
-                      </StatusBadge>
-                    </td>
-                    <td className="py-3">
-                      <span className="text-xs text-text-secondary">
-                        {agent.currentTask || 'Idle'}
-                      </span>
-                    </td>
-                    <td className="py-3">
-                      <div className="w-24">
-                        <ProgressBar
-                          value={agent.progress}
-                          max={100}
-                          color={agent.status === 'running' ? 'yellow' : agent.status === 'completed' ? 'green' : 'gray'}
-                        />
-                      </div>
-                    </td>
-                    <td className="py-3">
-                      <span className="text-xs text-text-secondary">
-                        {agent.runtime > 0 ? `${Math.floor(agent.runtime / 60)}m ${agent.runtime % 60}s` : '-'}
-                      </span>
-                    </td>
-                    <td className="py-3">
-                      <span className="text-xs text-text-secondary">
-                        {agent.tokens > 0 ? agent.tokens.toLocaleString() : '-'}
-                      </span>
-                    </td>
-                    <td className="py-3">
-                      <span className="text-xs text-text-secondary">
-                        {agent.cost > 0 ? `$${agent.cost.toFixed(2)}` : '-'}
-                      </span>
-                    </td>
-                    <td className="py-3">
-                      <button className="btn-ghost text-xs" onClick={(e) => { e.stopPropagation(); }}>
-                        <ChevronRight className="h-4 w-4" />
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </Card>
 
-      {/* Workflow Graph & Execution History */}
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Multi-Agent Workflow Graph */}
-        <Card>
-          <h3 className="section-title">Workflow Graph</h3>
-          <p className="text-xs text-text-muted mb-3">Agent execution sequence across the SDLC pipeline</p>
-          <div className="relative py-4">
-            <svg className="absolute inset-0 w-full h-full pointer-events-none">
-              <defs>
-                <linearGradient id="lineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                  <stop offset="0%" stopColor="#FFE600" stopOpacity="0.3" />
-                  <stop offset="100%" stopColor="#FFE600" stopOpacity="0.8" />
-                </linearGradient>
-              </defs>
-            </svg>
-            <div className="flex items-center justify-between flex-wrap gap-y-3">
-              {workflowSequence.map((node, index) => {
-                const Icon = node.icon || Bot;
-                const agent = mockAgents.find((a) => a.type === node.type);
-                const status = agent?.status || 'idle';
-                return (
-                  <div key={node.name} className="flex items-center">
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      transition={{ delay: index * 0.05 }}
-                      className={`flex flex-col items-center p-2 rounded-lg ${
-                        status === 'running' ? 'bg-ey-yellow/10 border border-ey-yellow/30' :
-                        status === 'completed' ? 'bg-status-success/10 border border-status-success/30' :
-                        status === 'waiting' ? 'bg-status-warning/10 border border-status-warning/30' :
-                        'bg-dark-bg border border-dark-border'
-                      }`}
-                    >
-                      <Icon className={`h-5 w-5 mb-1 ${
-                        status === 'running' ? 'text-ey-yellow animate-pulse' :
-                        status === 'completed' ? 'text-status-success' :
-                        status === 'waiting' ? 'text-status-warning' :
-                        'text-text-muted'
-                      }`} />
-                      <span className="text-[10px] text-text-secondary whitespace-nowrap">{node.name}</span>
-                    </motion.div>
-                    {index < workflowSequence.length - 1 && (
-                      <ChevronRight className={`h-4 w-4 mx-0.5 flex-shrink-0 ${
-                        status === 'completed' ? 'text-status-success' :
-                        status === 'running' ? 'text-ey-yellow' :
-                        'text-dark-border-light'
-                      }`} />
-                    )}
-                  </div>
-                );
-              })}
+          {/* Agent Fleet Table — real rows, real statuses, real durations */}
+          <Card>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="section-title mb-0">Agent Fleet</h3>
+              <span className="text-xs text-text-muted">{failedCount > 0 ? `${failedCount} failed` : 'All stages healthy'}</span>
             </div>
-          </div>
-        </Card>
-
-        {/* Execution History */}
-        <Card>
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="section-title mb-0">Execution History</h3>
-            <button className="btn-ghost text-xs">
-              <History className="mr-1 h-3 w-3" />
-              View All
-            </button>
-          </div>
-          <div className="space-y-2 max-h-[250px] overflow-y-auto">
-            {executionHistory.map((item) => (
-              <div key={item.id} className="flex items-center gap-3 rounded-lg bg-dark-bg p-2">
-                <div className={`h-2 w-2 rounded-full ${
-                  item.result === 'success' ? 'bg-status-success' :
-                  item.result === 'running' ? 'bg-status-info animate-pulse' :
-                  'bg-text-muted'
-                }`} />
-                <div className="flex-1">
-                  <p className="text-xs font-medium text-text-primary">{item.agent}</p>
-                  <p className="text-[10px] text-text-muted">{item.action}</p>
-                </div>
-                <span className="text-[10px] text-text-muted">{item.time}</span>
+            {runList.length === 0 ? (
+              <p className="text-xs text-text-muted py-8 text-center">No agent runs recorded for this project yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-dark-border">
+                      <th className="text-left text-xs font-medium text-text-muted pb-3">Agent</th>
+                      <th className="text-left text-xs font-medium text-text-muted pb-3">Status</th>
+                      <th className="text-left text-xs font-medium text-text-muted pb-3">Started</th>
+                      <th className="text-left text-xs font-medium text-text-muted pb-3">Duration</th>
+                      <th className="text-left text-xs font-medium text-text-muted pb-3">Details</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {runList.map((run) => {
+                      const Icon = agentIconFor(run.agent_name);
+                      return (
+                        <tr
+                          key={run.id}
+                          className="border-b border-dark-border/50 hover:bg-dark-cardHover cursor-pointer transition-colors"
+                          onClick={() => setSelectedRun(run)}
+                        >
+                          <td className="py-3">
+                            <div className="flex items-center gap-2">
+                              <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${
+                                run.status === 'running' ? 'bg-status-info/10' :
+                                run.status === 'completed' ? 'bg-status-success/10' :
+                                run.status === 'failed' ? 'bg-status-error/10' :
+                                'bg-dark-bg'
+                              }`}>
+                                <Icon className={`h-4 w-4 ${
+                                  run.status === 'running' ? 'text-status-info' :
+                                  run.status === 'completed' ? 'text-status-success' :
+                                  run.status === 'failed' ? 'text-status-error' :
+                                  'text-text-muted'
+                                }`} />
+                              </div>
+                              <span className="text-sm font-medium text-text-primary">{run.agent_name}</span>
+                            </div>
+                          </td>
+                          <td className="py-3">
+                            <StatusBadge status={
+                              run.status === 'running' ? 'running' :
+                              run.status === 'completed' ? 'success' :
+                              run.status === 'failed' ? 'error' : 'pending'
+                            }>
+                              {run.status}
+                            </StatusBadge>
+                          </td>
+                          <td className="py-3">
+                            <span className="text-xs text-text-secondary">
+                              {run.start_time ? new Date(run.start_time).toLocaleTimeString() : '—'}
+                            </span>
+                          </td>
+                          <td className="py-3">
+                            <span className="text-xs text-text-secondary">{formatDuration(run.start_time, run.end_time)}</span>
+                          </td>
+                          <td className="py-3">
+                            <button className="btn-ghost text-xs" onClick={(e) => { e.stopPropagation(); setSelectedRun(run); }}>
+                              <ChevronRight className="h-4 w-4" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
-            ))}
-          </div>
-        </Card>
-      </div>
+            )}
+          </Card>
+        </>
+      )}
 
-      {/* Agent Detail Modal */}
+      {/* Run Detail Modal — real AgentRunStatus fields only */}
       <AnimatePresence>
-        {selectedAgent && (
+        {selectedRun && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 flex items-center justify-center bg-dark-bg/80 backdrop-blur-sm"
-            onClick={() => setSelectedAgent(null)}
+            onClick={() => setSelectedRun(null)}
           >
             <motion.div
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="bg-dark-card border border-dark-border rounded-lg w-full max-w-2xl max-h-[80vh] overflow-hidden"
+              className="bg-dark-card border border-dark-border rounded-lg w-full max-w-lg max-h-[80vh] overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
-              {/* Modal Header */}
               <div className="flex items-center justify-between border-b border-dark-border p-4">
                 <div className="flex items-center gap-3">
                   {(() => {
-                    const Icon = agentIcons[selectedAgent.type] || Bot;
+                    const Icon = agentIconFor(selectedRun.agent_name);
                     return (
                       <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${
-                        selectedAgent.status === 'running' ? 'bg-status-info/10' :
-                        selectedAgent.status === 'completed' ? 'bg-status-success/10' :
+                        selectedRun.status === 'running' ? 'bg-status-info/10' :
+                        selectedRun.status === 'completed' ? 'bg-status-success/10' :
+                        selectedRun.status === 'failed' ? 'bg-status-error/10' :
                         'bg-dark-bg'
                       }`}>
                         <Icon className={`h-5 w-5 ${
-                          selectedAgent.status === 'running' ? 'text-status-info' :
-                          selectedAgent.status === 'completed' ? 'text-status-success' :
+                          selectedRun.status === 'running' ? 'text-status-info' :
+                          selectedRun.status === 'completed' ? 'text-status-success' :
+                          selectedRun.status === 'failed' ? 'text-status-error' :
                           'text-text-muted'
                         }`} />
                       </div>
                     );
                   })()}
                   <div>
-                    <h3 className="text-lg font-semibold text-text-primary">{selectedAgent.name}</h3>
-                    <p className="text-xs text-text-muted">Agent ID: {selectedAgent.id}</p>
+                    <h3 className="text-lg font-semibold text-text-primary">{selectedRun.agent_name}</h3>
+                    <p className="text-xs text-text-muted">Run ID: {selectedRun.id}</p>
                   </div>
                 </div>
                 <button
-                  onClick={() => setSelectedAgent(null)}
+                  onClick={() => setSelectedRun(null)}
                   className="rounded-lg p-2 text-text-muted hover:bg-dark-bg hover:text-text-primary"
                 >
                   <X className="h-5 w-5" />
                 </button>
               </div>
 
-              {/* Modal Content */}
-              <div className="p-4 overflow-y-auto">
-                {/* Current Objective */}
-                <div className="mb-6">
-                  <p className="text-xs text-text-muted mb-2">Current Objective</p>
-                  <div className="rounded-lg bg-dark-bg p-3 border border-dark-border">
-                    <p className="text-sm text-text-primary">{selectedAgent.currentTask || 'Waiting for task assignment'}</p>
-                    <ProgressBar
-                      value={selectedAgent.progress}
-                      max={100}
-                      color="yellow"
-                      showLabel
-                      className="mt-3"
-                    />
+              <div className="p-4 overflow-y-auto space-y-4">
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="text-center rounded-lg bg-dark-bg p-3">
+                    <StatusBadge status={
+                      selectedRun.status === 'running' ? 'running' :
+                      selectedRun.status === 'completed' ? 'success' :
+                      selectedRun.status === 'failed' ? 'error' : 'pending'
+                    }>
+                      {selectedRun.status}
+                    </StatusBadge>
+                  </div>
+                  <div className="text-center rounded-lg bg-dark-bg p-3">
+                    <p className="text-sm font-semibold text-text-primary">{selectedRun.start_time ? new Date(selectedRun.start_time).toLocaleTimeString() : '—'}</p>
+                    <p className="text-[10px] text-text-muted">Started</p>
+                  </div>
+                  <div className="text-center rounded-lg bg-dark-bg p-3">
+                    <p className="text-sm font-semibold text-text-primary">{formatDuration(selectedRun.start_time, selectedRun.end_time)}</p>
+                    <p className="text-[10px] text-text-muted">Duration</p>
                   </div>
                 </div>
 
-                {/* Stats Grid */}
-                <div className="grid grid-cols-4 gap-3 mb-6">
-                  <div className="text-center rounded-lg bg-dark-bg p-3">
-                    <p className="text-lg font-semibold text-text-primary">{selectedAgent.runtime}s</p>
-                    <p className="text-[10px] text-text-muted">Runtime</p>
+                {selectedRun.status === 'failed' && (
+                  <div className="rounded-lg border border-status-error/30 bg-status-error/5 p-3">
+                    <p className="text-xs font-medium text-status-error mb-1">Failure</p>
+                    <p className="text-xs text-text-secondary">{friendlyErrorMessage(selectedRun.output_url)}</p>
                   </div>
-                  <div className="text-center rounded-lg bg-dark-bg p-3">
-                    <p className="text-lg font-semibold text-text-primary">{selectedAgent.tokens.toLocaleString()}</p>
-                    <p className="text-[10px] text-text-muted">Tokens</p>
-                  </div>
-                  <div className="text-center rounded-lg bg-dark-bg p-3">
-                    <p className="text-lg font-semibold text-ey-yellow">${selectedAgent.cost.toFixed(2)}</p>
-                    <p className="text-[10px] text-text-muted">Cost</p>
-                  </div>
-                  <div className="text-center rounded-lg bg-dark-bg p-3">
-                    <p className="text-lg font-semibold text-status-success">{selectedAgent.progress}%</p>
-                    <p className="text-[10px] text-text-muted">Progress</p>
-                  </div>
-                </div>
-
-                {/* Execution History */}
-                <div className="mb-6">
-                  <p className="text-xs text-text-muted mb-2">Execution History</p>
-                  <div className="space-y-2 max-h-40 overflow-y-auto">
-                    {[
-                      'Started task execution',
-                      'Loaded context from previous agent',
-                      'Processing requirements',
-                      'Generating output artifacts',
-                    ].map((action, index) => (
-                      <div key={index} className="flex items-center gap-2 text-xs">
-                        <CheckCircle2 className="h-3 w-3 text-status-success" />
-                        <span className="text-text-secondary">{action}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Generated Artifacts */}
-                <div className="mb-6">
-                  <p className="text-xs text-text-muted mb-2">Generated Artifacts</p>
-                  <div className="space-y-2">
-                    {[
-                      { name: 'architecture_v2.yaml', type: 'Config' },
-                      { name: 'system-diagram.json', type: 'Diagram' },
-                      { name: 'api-specification.yaml', type: 'API' },
-                    ].map((artifact, index) => (
-                      <div key={index} className="flex items-center justify-between rounded-lg bg-dark-bg p-2">
-                        <div className="flex items-center gap-2">
-                          <Package className="h-4 w-4 text-ey-yellow" />
-                          <span className="text-xs text-text-primary">{artifact.name}</span>
-                        </div>
-                        <span className="text-[10px] text-text-muted">{artifact.type}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Dependencies */}
-                <div>
-                  <p className="text-xs text-text-muted mb-2">Dependencies</p>
-                  <div className="flex gap-2">
-                    <StatusBadge status="success">Requirement Agent</StatusBadge>
-                    <StatusBadge status="success">Business Analyst Agent</StatusBadge>
-                  </div>
-                </div>
+                )}
               </div>
 
-              {/* Modal Actions */}
               <div className="flex items-center justify-end gap-2 border-t border-dark-border p-4">
-                <button className="btn-ghost text-sm">
-                  <RefreshCw className="mr-2 h-4 w-4" />
-                  Restart Agent
-                </button>
-                <button className="btn-secondary text-sm">
-                  <Settings className="mr-2 h-4 w-4" />
-                  Configure
+                <button
+                  onClick={() => handleRestartAgent(selectedRun)}
+                  disabled={restarting || selectedRun.status === 'running'}
+                  className="btn-secondary text-sm disabled:opacity-50"
+                >
+                  {restarting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RotateCcw className="mr-2 h-4 w-4" />}
+                  Re-run this stage
                 </button>
               </div>
             </motion.div>

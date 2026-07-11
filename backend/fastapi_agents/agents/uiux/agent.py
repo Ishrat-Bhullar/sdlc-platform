@@ -10,14 +10,14 @@ code is generated. Owns its own prompt (prompts.py) and schema
 from __future__ import annotations
 
 import json
-import logging
+from ...logging_config import get_logger
 from typing import Any
 
 from ..llm_service import LLMService
-from .prompts import UIUX_SYSTEM_PROMPT
+from .prompts import UIUX_REFINEMENT_ADDENDUM, UIUX_SYSTEM_PROMPT
 from .schemas import UIUXDesignOutput
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------
@@ -87,7 +87,9 @@ MOCK_UIUX: dict[str, Any] = {
 def build_uiux_prompt(
     project_description: str,
     requirements: dict | None = None,
-    user_stories: dict | None = None
+    user_stories: dict | None = None,
+    refinement_instruction: str | None = None,
+    existing_design: dict | None = None,
 ) -> str:
     context = f"Project Description: {project_description}\n\n"
 
@@ -96,6 +98,15 @@ def build_uiux_prompt(
 
     if user_stories:
         context += f"User Stories:\n{json.dumps(user_stories, indent=2)}\n\n"
+
+    if refinement_instruction and existing_design:
+        context += f"Existing Design (revise this):\n{json.dumps(existing_design, indent=2)}\n\n"
+        context += f"Refinement Instruction:\n{refinement_instruction}\n\n"
+        return f"""
+{context}
+
+Revise the existing design per the refinement instruction and return the full updated design output now.
+"""
 
     return f"""
 {context}
@@ -113,15 +124,24 @@ class UIUXDesignAgent:
         self,
         project_description: str,
         requirements: dict | None = None,
-        user_stories: dict | None = None
+        user_stories: dict | None = None,
+        refinement_instruction: str | None = None,
+        existing_design: dict | None = None,
     ) -> UIUXDesignOutput:
 
         if not project_description:
             raise ValueError("Project description cannot be empty")
 
+        is_refinement = bool(refinement_instruction and existing_design)
+        system_prompt = UIUX_SYSTEM_PROMPT + UIUX_REFINEMENT_ADDENDUM if is_refinement else UIUX_SYSTEM_PROMPT
+
         result = self.llm.generate_json(
-            system=UIUX_SYSTEM_PROMPT,
-            prompt=build_uiux_prompt(project_description, requirements, user_stories),
+            system=system_prompt,
+            prompt=build_uiux_prompt(
+                project_description, requirements, user_stories,
+                refinement_instruction=refinement_instruction,
+                existing_design=existing_design,
+            ),
             schema=UIUXDesignOutput,
         )
 

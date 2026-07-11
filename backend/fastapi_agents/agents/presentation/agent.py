@@ -31,7 +31,7 @@ Video output:
 """
 from __future__ import annotations
 
-import logging
+from ...logging_config import get_logger
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,7 +58,7 @@ from .schemas import (
 from .slide_designer import LogicAgentOutput, SlideDesignerAgent
 from .storytelling import StorySpine, StorytellingAgent
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Required artifact types — validated before the agent runs

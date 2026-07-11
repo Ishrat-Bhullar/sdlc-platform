@@ -65,9 +65,10 @@ CRITICAL DESIGN RULES & CONSTRAINTS
    - Design principles: 4-6 principles that explain the visual language decisions (e.g. "generous whitespace over dense layouts because...").
 
 7. STYLE OPTIONS (required — presented to the user to choose from BEFORE any code is generated):
-   - Produce 5-6 distinct, named visual-style directions appropriate to this specific project (e.g. "Modern SaaS", "Minimal", "Glassmorphism", "Material", "Enterprise", "Dashboard" — adapt the names/count to what actually fits the product, these are illustrative, not a fixed list).
-   - Each style option is a genuinely different visual direction, not a re-skin — vary the color palette, typography, spacing density, and button treatment meaningfully between options.
-   - Each option needs: a short name, a one-line description of the visual feel, a full colorPalette (same shape as the design system's), a typography scale, a spacing system, a concrete buttonStyle description (shape, elevation, fill vs outline, hover treatment), and a layoutDescription (density, whitespace, card vs flat, information architecture feel).
+   - Produce 3 distinct, named, COMPLETE design directions appropriate to this specific project (e.g. "Modern SaaS", "Minimal", "Glassmorphism", "Material", "Enterprise", "Dashboard" — adapt the names to what actually fits the product, these are illustrative, not a fixed list). Exactly 3, not 5-6 — each one is now a full design (see below), not just a theme, so 3 genuinely complete options is more useful than 5-6 thin ones.
+   - CRITICAL: each option is a full, self-contained UI DESIGN, not just a color/font theme. It must include its OWN complete set of screens (reuse the same shape as the top-level "screens" array — name/purpose/type/components — but this option's screens can differ in structure, information architecture, and component choices from the other options, not just recolored). Whichever option the user ultimately picks is what the Frontend Agent will build, in full, instead of the top-level "screens" array — so every screen the app needs must be present in EACH option, not just a subset.
+   - Each option is a genuinely different direction overall — vary the color palette, typography, spacing density, button treatment, navigation structure, and screen layout meaningfully between options, not just the color palette.
+   - Each option needs: a short name; a one-line description of the visual feel; a full colorPalette (same shape as the design system's); a typography scale; a spacing system; a concrete buttonStyle description (shape, elevation, fill vs outline, hover treatment); a layoutDescription (density, whitespace, card vs flat, information architecture feel); a navigation string describing the actual nav structure (e.g. "Persistent left sidebar with 5 sections, top bar with search and user menu" vs "Top navbar only, mobile hamburger below 768px"); this option's own full screens array; componentRecommendations specific to this option's screens; dataVisualizations — a list of concrete chart/table/graph elements this option actually uses where the project calls for them (e.g. "Line chart of weekly temperature trend on the Dashboard screen", "Sortable transaction history table on the Accounts screen") — leave this empty only if the project genuinely has no data to visualize; and responsiveness — a concrete description of how THIS option's layout changes across mobile/tablet/desktop (not just "responsive").
    - No placeholder text — every field must be concrete and usable as direct implementation guidance.
 
 
@@ -219,12 +220,28 @@ Do not include markdown blocks like ```json ... ```, wrapper texts, or post-proc
       },
       "spacing": {"baseUnit": "8px", "scale": ["4px", "8px", "16px", "24px", "32px"], "rationale": "string"},
       "buttonStyle": "string — shape, fill vs outline, elevation, hover/active treatment",
-      "layoutDescription": "string — density, whitespace, card vs flat, information architecture feel"
+      "layoutDescription": "string — density, whitespace, card vs flat, information architecture feel",
+      "navigation": "string — the actual nav structure for this option, e.g. 'Persistent left sidebar with icons + labels for Dashboard/Products/Orders/Settings, top bar with search and user avatar'",
+      "screens": [
+        {
+          "name": "Home Page",
+          "purpose": "Landing page showing featured products and categories",
+          "type": "page",
+          "components": ["Navigation Bar", "Hero Banner", "Product Grid", "Category Filter", "Footer"]
+        }
+      ],
+      "componentRecommendations": [
+        {"name": "Product Grid", "type": "Layout Component", "library": "custom CSS grid", "rationale": "string"}
+      ],
+      "dataVisualizations": [
+        "string — a concrete chart/table this option uses and on which screen, e.g. 'Bar chart of monthly revenue on the Analytics screen'"
+      ],
+      "responsiveness": "string — concretely how THIS option's layout changes at mobile/tablet/desktop, e.g. 'Sidebar collapses to a bottom tab bar below 768px; product grid goes from 4 to 2 to 1 columns'"
     }
   ]
 }
 
-Provide 5-6 entries in "styleOptions", each following the same shape as the example above but with genuinely different palettes/typography/spacing/button treatment/layout appropriate to this project.
+Provide exactly 3 entries in "styleOptions", each following the same shape as the example above — including its OWN full "screens" array covering every screen the app needs — but with genuinely different palettes/typography/spacing/button treatment/navigation/layout appropriate to this project.
 
 
 IMPORTANT NOTES
@@ -236,4 +253,19 @@ IMPORTANT NOTES
 - Consider mobile-first design approach
 - Ensure consistency across all UI elements
 - Focus on user needs and business goals
+"""
+
+UIUX_REFINEMENT_ADDENDUM = r"""
+
+REFINEMENT MODE
+
+You are being given a PREVIOUSLY GENERATED design (as JSON) plus a refinement instruction from the user.
+Revise the existing design according to the instruction — do not start over from scratch. Keep everything
+that isn't affected by the instruction unchanged (same screens, flows, wireframes, components, design
+system, and style options unless the instruction specifically calls for changing them) — this includes each
+style option's own nested screens/navigation/componentRecommendations/dataVisualizations/responsiveness,
+not just its palette/typography. Return the FULL design object again in the exact same JSON shape described
+above (screens, userFlows, wireframes, componentRecommendations, uxRecommendations, designSystem,
+styleOptions, each styleOptions entry keeping its own complete screens array) — not a diff, not a partial
+object.
 """

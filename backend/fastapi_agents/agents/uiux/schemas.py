@@ -97,11 +97,19 @@ class DesignSystem(BaseModel):
 
 
 class StyleOption(BaseModel):
-    """One named visual-style direction presented to the user before any
+    """One named, COMPLETE design direction presented to the user before any
     frontend code is generated (e.g. "Modern SaaS", "Minimal",
     "Glassmorphism"). Reuses the same palette/typography/spacing shapes as
     DesignSystem so a picked style maps directly onto generation guidance
-    fed to the Frontend Agent."""
+    fed to the Frontend Agent.
+
+    screens/navigation/componentRecommendations/dataVisualizations/
+    responsiveness make this a self-contained design (not just a theme) —
+    once selected, this whole object (not just the palette) becomes the
+    Frontend Agent's source of truth for what to build. All new fields
+    default to empty so older persisted style-option artifacts (generated
+    before this was added) still parse fine; a consumer with no `screens`
+    here should fall back to the top-level UIUXDesignOutput.screens."""
     name: str = ""
     description: str = ""
     colorPalette: ColorPalette = ColorPalette()
@@ -109,6 +117,11 @@ class StyleOption(BaseModel):
     spacing: SpacingSystem = SpacingSystem()
     buttonStyle: str = ""
     layoutDescription: str = ""
+    navigation: str = ""
+    screens: list[Screen] = []
+    componentRecommendations: list[ComponentRecommendation] = []
+    dataVisualizations: list[str] = []
+    responsiveness: str = ""
 
 
 class UIUXDesignOutput(BaseModel):

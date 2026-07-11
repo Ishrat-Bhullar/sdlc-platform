@@ -1,19 +1,18 @@
 import { useState } from 'react';
-import { motion } from 'framer-motion';
 import {
   TestTube,
   CheckCircle2,
   XCircle,
   AlertTriangle,
-  Download,
   FileJson,
   FileType,
   RefreshCw,
   Play,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar, PreviewBadge } from '../components/ui/Card';
+import { Card, StatusBadge } from '../components/ui/Card';
 import { Accordion, AccordionItem, BulletList, DataTable } from '../components/ui/Accordion';
 import { CodeBlock } from '../components/ui/CodeBlock';
+import { RegenerateButton } from '../components/ui/RegenerateButton';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
 import type { TestReportContent, TestCaseSpec } from '../types/unified';
@@ -22,7 +21,7 @@ import { Boxes, Server, Globe2, MonitorSmartphone, Gauge, ShieldAlert, AlertOcta
 export function TestingWorkspace() {
   const [activeTab, setActiveTab] = useState<'overview' | 'suites' | 'coverage' | 'cases'>('overview');
   const projectId = getSelectedProjectId();
-  const { getTestReport, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
+  const { getTestReport, loading, error, reload } = useUnifiedArtifacts(projectId);
 
   const testReport = getTestReport();
 
@@ -86,12 +85,21 @@ export function TestingWorkspace() {
       <div className="space-y-6">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold text-text-primary">Testing Workspace</h1>
-          <PreviewBadge label="Preview — Agent Under Development" />
         </div>
-        <Card className="py-10 text-center">
+        <Card className="py-10 text-center space-y-3">
           <TestTube className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
           <p className="text-sm text-text-muted">No test report generated yet.</p>
           <p className="text-xs text-text-muted mt-1">Run the Testing Agent to generate test suites and coverage report.</p>
+          {projectId && (
+            <RegenerateButton
+              projectId={projectId}
+              agentName="Testing Agent"
+              onRegenerated={reload}
+              label="Generate"
+              className="btn-primary text-sm"
+              align="center"
+            />
+          )}
         </Card>
       </div>
     );
@@ -110,7 +118,6 @@ export function TestingWorkspace() {
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold text-text-primary">Testing Workspace</h1>
-            <PreviewBadge label="Preview — Agent Under Development" />
           </div>
           <p className="mt-1 text-sm text-text-muted">Test suites, coverage, and quality metrics</p>
         </div>
@@ -119,6 +126,9 @@ export function TestingWorkspace() {
             {testReport.status === 'passed' ? <CheckCircle2 className="mr-1 h-3 w-3" /> : <AlertTriangle className="mr-1 h-3 w-3" />}
             {testReport.status || 'Pending'}
           </StatusBadge>
+          {projectId && (
+            <RegenerateButton projectId={projectId} agentName="Testing Agent" onRegenerated={reload} />
+          )}
           <button onClick={reload} className="btn-ghost text-sm" disabled={loading}>
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh

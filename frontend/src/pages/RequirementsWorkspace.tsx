@@ -1,22 +1,11 @@
 import { useState, useMemo } from 'react';
-import { motion } from 'framer-motion';
 import {
-  FileText,
-  Upload,
-  Link2,
-  Send,
   AlertTriangle,
   CheckCircle2,
   Clock,
   Zap,
   FileSearch,
   Lightbulb,
-  Layers,
-  Edit3,
-  Save,
-  Download,
-  BarChart3,
-  Target,
   Shield,
   GitBranch,
   RefreshCw,
@@ -35,8 +24,10 @@ import {
   ShieldAlert,
   Boxes,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Card, StatusBadge } from '../components/ui/Card';
 import { Accordion, AccordionItem, BulletList as AccordionBulletList } from '../components/ui/Accordion';
+import { ApprovalBadge, ApprovalBanner } from '../components/ui/ApprovalStatus';
+import { RegenerateButton } from '../components/ui/RegenerateButton';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
 import { buildApiUrl, fastApiRequest } from '../lib/api';
@@ -104,15 +95,13 @@ function parseContent(raw: string | Record<string, unknown>): Record<string, unk
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function RequirementsWorkspace() {
-  const [activeTab, setActiveTab] = useState<'editor' | 'functional' | 'non-functional' | 'risks' | 'dependencies' | 'acceptance' | 'roles'>('editor');
-  const [requirementText, setRequirementText] = useState('');
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editValues, setEditValues] = useState<Partial<Requirement>>({});
+  const [activeTab, setActiveTab] = useState<'functional' | 'non-functional' | 'risks' | 'dependencies' | 'acceptance' | 'roles'>('functional');
 
   const projectId = getSelectedProjectId();
-  const { getRequirements, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
+  const { getRequirements, getApprovalStatus, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
 
   const reqData = getRequirements();
+  const approvalStatus = getApprovalStatus('requirements_doc');
 
   const requirements = reqData?.requirements || [];
   const assumptions = reqData?.assumptions || [];
@@ -219,22 +208,6 @@ export function RequirementsWorkspace() {
   const totalAC = acceptanceCriteria.length;
   const highPriorityCount = [...functionalReqs, ...nonFunctionalReqs].filter((r) => r.priority === 'high' || r.priority === 'critical').length;
 
-  // Edit handlers
-  const startEdit = (req: Requirement) => {
-    setEditingId(req.id);
-    setEditValues({ ...req });
-  };
-
-  const saveEdit = () => {
-    setEditingId(null);
-    setEditValues({});
-  };
-
-  const cancelEdit = () => {
-    setEditingId(null);
-    setEditValues({});
-  };
-
   const noProject = !projectId;
 
   const handleExport = async (format: 'json' | 'md') => {
@@ -283,6 +256,10 @@ export function RequirementsWorkspace() {
             <AlertTriangle className="mr-1 h-3 w-3" />
             {totalRisks} Risks
           </StatusBadge>
+          <ApprovalBadge status={approvalStatus} />
+          {projectId && (
+            <RegenerateButton projectId={projectId} agentName="Requirement Agent" onRegenerated={reload} />
+          )}
           <button onClick={reload} className="btn-ghost text-sm" disabled={loading}>
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
@@ -303,6 +280,11 @@ export function RequirementsWorkspace() {
           </div>
         </div>
       </div>
+
+      <ApprovalBanner
+        status={approvalStatus}
+        note="Review the generated Requirements in this workspace, then approve Human Checkpoint 1 in the Approval Center."
+      />
 
       {/* Error state */}
       {error && (
@@ -355,7 +337,6 @@ export function RequirementsWorkspace() {
           {/* Tabs */}
           <div className="flex border-b border-dark-border">
             {[
-              { id: 'editor', label: 'Requirement Editor', icon: Edit3 },
               { id: 'functional', label: 'Functional', icon: FileSearch },
               { id: 'non-functional', label: 'Non-Functional', icon: Shield },
               { id: 'risks', label: 'Risks', icon: AlertTriangle },
@@ -378,44 +359,6 @@ export function RequirementsWorkspace() {
             ))}
           </div>
 
-          {/* Editor tab */}
-          {activeTab === 'editor' && (
-            <Card>
-              <div className="flex items-center gap-2 mb-4">
-                <Edit3 className="h-5 w-5 text-ey-yellow" />
-                <h3 className="text-lg font-semibold text-text-primary">Requirement Editor</h3>
-              </div>
-              <textarea
-                value={requirementText}
-                onChange={(e) => setRequirementText(e.target.value)}
-                placeholder="Enter or paste your business requirements here. Support for natural language, structured documents, or bullet points..."
-                className="input-field h-48 w-full resize-none text-sm"
-              />
-              <div className="mt-4 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <button className="btn-ghost text-xs">
-                    <Upload className="mr-1 h-3 w-3" />
-                    Upload Document
-                  </button>
-                  <button className="btn-ghost text-xs">
-                    <Link2 className="mr-1 h-3 w-3" />
-                    Jira Sync
-                  </button>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button className="btn-secondary text-sm">
-                    <FileSearch className="mr-1 h-4 w-4" />
-                    Analyze Requirements
-                  </button>
-                  <button className="btn-primary text-sm">
-                    <Send className="mr-1 h-4 w-4" />
-                    Generate Architecture
-                  </button>
-                </div>
-              </div>
-            </Card>
-          )}
-
           {/* Functional Requirements tab */}
           {activeTab === 'functional' && (
             <Card>
@@ -437,53 +380,7 @@ export function RequirementsWorkspace() {
               ) : (
                 <div className="space-y-2">
                   {functionalReqs.map((req) => (
-                    <RequirementCard key={req.id} req={req} onEdit={() => startEdit(req)}
-                      editing={editingId === req.id} editValues={editValues} setEditValues={setEditValues}
-                      saveEdit={saveEdit} cancelEdit={cancelEdit} />
-                  ))}
-                </div>
-              )}
-            </Card>
-          )}
-
-          {/* Non-Functional Requirements tab (legacy hidden reference) */}
-          {false && activeTab === 'functional' && (
-            <Card>
-              {functionalReqs.length === 0 ? null : (
-                <div className="space-y-2">
-                  {functionalReqs.map((req) => (
-                    <div key={req.id} className="rounded-lg bg-dark-bg p-3">
-                      {editingId === req.id ? (
-                        <div className="space-y-2">
-                          <input className="input-field text-xs w-full" value={editValues.description || ''} onChange={(e) => setEditValues({ ...editValues, description: e.target.value })} />
-                          <div className="flex gap-2">
-                            <select className="input-field text-xs" value={editValues.priority || 'medium'} onChange={(e) => setEditValues({ ...editValues, priority: e.target.value })}>
-                              <option>low</option><option>medium</option><option>high</option><option>critical</option>
-                            </select>
-                            <button onClick={saveEdit} className="btn-ghost text-xs"><Save className="h-3 w-3" /> Save</button>
-                            <button onClick={cancelEdit} className="btn-ghost text-xs">Cancel</button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="flex items-start justify-between">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-[10px] font-mono text-ey-yellow">{req.id}</span>
-                              <span className={`text-[10px] px-2 py-0.5 rounded-full ${
-                                req.priority === 'critical' ? 'bg-status-error/10 text-status-error'
-                                : req.priority === 'high' ? 'bg-status-warning/10 text-status-warning'
-                                : 'bg-dark-border text-text-muted'
-                              }`}>{req.priority}</span>
-                            </div>
-                            <p className="text-xs text-text-primary">{req.description}</p>
-                            <p className="text-[10px] text-text-muted mt-1">Category: {req.category} · Source: {req.source}</p>
-                          </div>
-                          <button onClick={() => startEdit(req)} className="p-1 rounded hover:bg-dark-surface text-text-muted hover:text-ey-yellow">
-                            <Edit3 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
+                    <RequirementCard key={req.id} req={req} />
                   ))}
                 </div>
               )}
@@ -505,9 +402,7 @@ export function RequirementsWorkspace() {
               ) : (
                 <div className="space-y-2">
                   {nonFunctionalReqs.map((req) => (
-                    <RequirementCard key={req.id} req={req} onEdit={() => startEdit(req)}
-                      editing={editingId === req.id} editValues={editValues} setEditValues={setEditValues}
-                      saveEdit={saveEdit} cancelEdit={cancelEdit} />
+                    <RequirementCard key={req.id} req={req} />
                   ))}
                 </div>
               )}
@@ -711,12 +606,6 @@ export function RequirementsWorkspace() {
 
 interface RequirementCardProps {
   req: Requirement;
-  onEdit: () => void;
-  editing: boolean;
-  editValues: Partial<Requirement>;
-  setEditValues: (v: Partial<Requirement>) => void;
-  saveEdit: () => void;
-  cancelEdit: () => void;
 }
 
 function Section({ icon: Icon, title, children }: { icon: any; title: string; children: React.ReactNode }) {
@@ -744,24 +633,9 @@ function BulletList({ items }: { items?: string[] }) {
   );
 }
 
-function RequirementCard({ req, onEdit, editing, editValues, setEditValues, saveEdit, cancelEdit }: RequirementCardProps) {
+function RequirementCard({ req }: RequirementCardProps) {
   const [open, setOpen] = useState(false);
   const hasDetail = !!(req.business_rules?.length || req.acceptance_criteria?.length || req.validations?.length);
-
-  if (editing) {
-    return (
-      <div className="rounded-lg bg-dark-bg p-3 space-y-2">
-        <input className="input-field text-xs w-full" value={editValues.description || ''} onChange={(e) => setEditValues({ ...editValues, description: e.target.value })} />
-        <div className="flex gap-2">
-          <select className="input-field text-xs" value={editValues.priority || 'medium'} onChange={(e) => setEditValues({ ...editValues, priority: e.target.value })}>
-            <option>low</option><option>medium</option><option>high</option><option>critical</option>
-          </select>
-          <button onClick={saveEdit} className="btn-ghost text-xs"><Save className="h-3 w-3" /> Save</button>
-          <button onClick={cancelEdit} className="btn-ghost text-xs">Cancel</button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="rounded-lg bg-dark-bg overflow-hidden">
@@ -785,9 +659,6 @@ function RequirementCard({ req, onEdit, editing, editValues, setEditValues, save
             <p className="text-xs text-text-primary">{req.description}</p>
             <p className="text-[10px] text-text-muted mt-1">Category: {req.category} · Source: {req.source}</p>
           </div>
-        </button>
-        <button onClick={onEdit} className="p-1 rounded hover:bg-dark-surface text-text-muted hover:text-ey-yellow flex-shrink-0">
-          <Edit3 className="h-3.5 w-3.5" />
         </button>
       </div>
 

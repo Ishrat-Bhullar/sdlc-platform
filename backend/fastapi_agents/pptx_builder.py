@@ -22,14 +22,14 @@ deck and the rendered video stay visually identical.
 from __future__ import annotations
 
 import io
-import logging
+from .logging_config import get_logger
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi_agents import theme_engine as TE
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Kept for backwards-compat: other modules import THEMES from here.
 THEMES = TE.THEMES

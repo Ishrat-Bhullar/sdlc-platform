@@ -10,14 +10,14 @@ calls `.generate(...)`.
 """
 from __future__ import annotations
 
-import logging
+from ...logging_config import get_logger
 from typing import Any
 
 from ..llm_service import LLMService
 from .prompts import SOLUTION_ARCHITECT_SYSTEM_PROMPT
 from .schemas import ArchitectAgentOutput
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------

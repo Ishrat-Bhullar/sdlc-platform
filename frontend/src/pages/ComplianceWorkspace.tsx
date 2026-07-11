@@ -1,33 +1,37 @@
 import { useState } from 'react';
-import { motion } from 'framer-motion';
 import {
   FileCheck,
   AlertTriangle,
   Shield,
   Lock,
   CheckCircle2,
-  Download,
   FileJson,
   FileType,
   RefreshCw,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Card, StatusBadge } from '../components/ui/Card';
+import { ApprovalBadge, ApprovalBanner } from '../components/ui/ApprovalStatus';
+import { RegenerateButton } from '../components/ui/RegenerateButton';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
+import { artifactToMarkdown } from '../lib/toMarkdown';
 import type { ComplianceReportContent } from '../types/unified';
 
 export function ComplianceWorkspace() {
   const [activeTab, setActiveTab] = useState<'assessment' | 'governance' | 'audit' | 'retention'>('assessment');
   const projectId = getSelectedProjectId();
-  const { getComplianceReport, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
+  const { getComplianceReport, getApprovalStatus, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
 
   const compliance = getComplianceReport();
+  const approvalStatus = getApprovalStatus('compliance_report');
 
   const handleExport = async (format: 'json' | 'md') => {
     if (!projectId || !compliance) return;
     try {
-      const content = JSON.stringify(compliance, null, 2);
-      const blob = new Blob([content], { type: 'application/json' });
+      const content = format === 'md'
+        ? artifactToMarkdown('Compliance Report', compliance as unknown as Record<string, unknown>)
+        : JSON.stringify(compliance, null, 2);
+      const blob = new Blob([content], { type: format === 'md' ? 'text/markdown' : 'application/json' });
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = blobUrl;
@@ -81,10 +85,20 @@ export function ComplianceWorkspace() {
   if (!compliance) {
     return (
       <div className="space-y-6">
-        <Card className="py-10 text-center">
+        <Card className="py-10 text-center space-y-3">
           <FileCheck className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
           <p className="text-sm text-text-muted">No compliance report generated yet.</p>
           <p className="text-xs text-text-muted mt-1">Run the Compliance Architect Agent to generate compliance assessment.</p>
+          {projectId && (
+            <RegenerateButton
+              projectId={projectId}
+              agentName="Compliance Architect Agent"
+              onRegenerated={reload}
+              label="Generate"
+              className="btn-primary text-sm"
+              align="center"
+            />
+          )}
         </Card>
       </div>
     );
@@ -110,6 +124,10 @@ export function ComplianceWorkspace() {
             <CheckCircle2 className="mr-1 h-3 w-3" />
             Report Generated
           </StatusBadge>
+          <ApprovalBadge status={approvalStatus} />
+          {projectId && (
+            <RegenerateButton projectId={projectId} agentName="Compliance Architect Agent" onRegenerated={reload} />
+          )}
           <button onClick={reload} className="btn-ghost text-sm" disabled={loading}>
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
@@ -124,6 +142,11 @@ export function ComplianceWorkspace() {
           </div>
         </div>
       </div>
+
+      <ApprovalBanner
+        status={approvalStatus}
+        note="Review this compliance report, then approve Human Checkpoint 2 in the Approval Center."
+      />
 
       {/* Metrics row */}
       <div className="grid gap-3 md:grid-cols-4">

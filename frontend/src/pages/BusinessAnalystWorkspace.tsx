@@ -2,8 +2,9 @@
  * BusinessAnalystWorkspace.tsx
  * ─────────────────────────────────────────────────────────────────────────────
  * Full Business Analyst workspace showing Epics, User Stories, Acceptance
- * Criteria, Story Points, Priorities, MoSCoW classification, Personas,
- * and editable tables — all sourced from the user_stories artifact.
+ * Criteria, Story Points, Priorities, MoSCoW classification, and Personas —
+ * all sourced from the real user_stories artifact (read-only; there is no
+ * backend endpoint to persist edits, so this view never claims to support them).
  */
 import { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
@@ -11,27 +12,24 @@ import {
   Briefcase,
   FileText,
   CheckCircle2,
-  Clock,
   AlertTriangle,
   Users,
   BarChart3,
-  Edit3,
-  Save,
   RefreshCw,
-  Download,
   Layers,
   Target,
-  Lightbulb,
   Zap,
   FileJson,
   FileType,
   FileText as FileTextIcon,
   File,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Card, StatusBadge } from '../components/ui/Card';
 import { Accordion, AccordionItem, BulletList } from '../components/ui/Accordion';
 import { Markdown } from '../components/ui/Markdown';
-import { useProjectArtifacts } from '../lib/useProjectArtifacts';
+import { ApprovalBadge, ApprovalBanner } from '../components/ui/ApprovalStatus';
+import { RegenerateButton } from '../components/ui/RegenerateButton';
+import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
 import { buildApiUrl } from '../lib/api';
 
@@ -64,40 +62,29 @@ interface Persona {
   goals: string[];
   painPoints: string[];
   demographics: string;
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function parseContent(raw: string | Record<string, unknown>): Record<string, unknown> {
-  if (raw === null || raw === undefined) return {};
-  if (typeof raw === 'string') {
-    try { return JSON.parse(raw); } catch { return { raw_text: raw }; }
-  }
-  return raw as Record<string, unknown>;
+  /** True when derived client-side from story roles because the Business
+   *  Analyst agent didn't generate explicit personas — not agent output. */
+  isDerived?: boolean;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function BusinessAnalystWorkspace() {
   const [activeTab, setActiveTab] = useState<'stories' | 'epics' | 'personas' | 'brd-srs' | 'flows' | 'risks'>('stories');
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editValues, setEditValues] = useState<Partial<StoryRow>>({});
 
   const projectId = getSelectedProjectId();
-  const { artifacts, loading, error, reload } = useProjectArtifacts(projectId);
+  const { loading, error, reload, getArtifact, getApprovalStatus } = useUnifiedArtifacts(projectId);
+  const approvalStatus = getApprovalStatus('user_stories');
 
-  const storiesArtifact = useMemo(
-    () => artifacts.find((a) => a.artifact_type === 'user_stories') || null,
-    [artifacts]
-  );
+  const storiesArtifactData = getArtifact('user_stories');
 
   const storiesData = useMemo(() => {
-    if (!storiesArtifact) return {
+    if (!storiesArtifactData) return {
       epics: [], stories: [], personas: [], detailed_brd: '', srs: '',
       process_flows: [], business_workflows: [], validation_rules: [],
       exception_handling: [], risk_analysis: [], success_metrics: [],
     };
-    const data = parseContent(storiesArtifact.content);
+    const data = storiesArtifactData;
     return {
       epics: (data.epics as any[]) || [],
       stories: (data.stories as any[]) || [],
@@ -111,7 +98,7 @@ export function BusinessAnalystWorkspace() {
       risk_analysis: (data.risk_analysis as any[]) || [],
       success_metrics: (data.success_metrics as any[]) || [],
     };
-  }, [storiesArtifact]);
+  }, [storiesArtifactData]);
 
   // Build story rows from epics + direct stories
   const storyRows: StoryRow[] = useMemo(() => {
@@ -187,15 +174,19 @@ export function BusinessAnalystWorkspace() {
       painPoints: Array.isArray(p?.pain_points) ? p.pain_points.map(String) : Array.isArray(p?.painPoints) ? p.painPoints.map(String) : [],
       demographics: String(p?.demographics ?? ''),
     }));
-    // Derive personas from stories if not explicitly defined
+    // Derive a minimal stand-in from story roles if the agent didn't
+    // generate explicit personas — clearly marked isDerived so the UI can
+    // distinguish this from real agent output rather than presenting
+    // generic placeholder text as if it were generated insight.
     if (fromData.length === 0) {
       const roles = new Set(storyRows.map((s) => s.role).filter(Boolean));
       return Array.from(roles).map((role) => ({
         name: role.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
         role,
-        goals: [`Use the system effectively to accomplish ${role} tasks`],
-        painPoints: ['Needs clear navigation', 'Requires fast access to information'],
+        goals: [],
+        painPoints: [],
         demographics: '',
+        isDerived: true,
       }));
     }
     return fromData;
@@ -211,27 +202,10 @@ export function BusinessAnalystWorkspace() {
   }
   const completedStories = storyRows.filter((s) => s.status === 'done').length;
 
-  // Edit handlers
-  const startEdit = (story: StoryRow) => {
-    setEditingId(story.id);
-    setEditValues({ ...story });
-  };
-
-  const saveEdit = () => {
-    setEditingId(null);
-    setEditValues({});
-    // In a real app, this would call an API to persist changes
-  };
-
-  const cancelEdit = () => {
-    setEditingId(null);
-    setEditValues({});
-  };
-
   const noProject = !projectId;
 
   const handleExport = async (format: 'json' | 'md' | 'pdf' | 'docx') => {
-    if (!projectId || !storiesArtifact) return;
+    if (!projectId || !storiesArtifactData) return;
 try {
       const url = buildApiUrl(`/documents/export-artifact?projectId=${projectId}&artifact_type=user_stories&format=${format}`);
       const resp = await fetch(url, { credentials: 'include' });
@@ -267,6 +241,10 @@ try {
             <BarChart3 className="mr-1 h-3 w-3" />
             {totalPoints} Points
           </StatusBadge>
+          <ApprovalBadge status={approvalStatus} />
+          {projectId && (
+            <RegenerateButton projectId={projectId} agentName="Business Analyst Agent" onRegenerated={reload} />
+          )}
           <button onClick={reload} className="btn-ghost text-sm" disabled={loading}>
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
@@ -287,6 +265,11 @@ try {
           </div>
         </div>
       </div>
+
+      <ApprovalBanner
+        status={approvalStatus}
+        note="Review the generated Business Analysis in this workspace, then approve Human Checkpoint 1 in the Approval Center."
+      />
 
       {/* Error state */}
       {error && (
@@ -396,7 +379,7 @@ try {
             <Card>
               <div className="flex items-center justify-between mb-4">
                 <h3 className="section-title mb-0">User Stories</h3>
-                <span className="text-xs text-text-muted">{totalStories} stories · Click to edit</span>
+                <span className="text-xs text-text-muted">{totalStories} stories</span>
               </div>
               {loading ? (
                 <div className="flex items-center justify-center py-8">
@@ -420,99 +403,32 @@ try {
                         <th className="text-left text-xs font-medium text-text-muted pb-3">MoSCoW</th>
                         <th className="text-left text-xs font-medium text-text-muted pb-3">Points</th>
                         <th className="text-left text-xs font-medium text-text-muted pb-3">Status</th>
-                        <th className="text-left text-xs font-medium text-text-muted pb-3">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
                       {storyRows.map((story) => (
                         <tr key={story.id} className="border-b border-dark-border/50 hover:bg-dark-cardHover">
-                          {editingId === story.id ? (
-                            <>
-                              <td className="py-3 text-xs font-mono text-text-muted">{story.id}</td>
-                              <td className="py-3">
-                                <input
-                                  className="input-field text-xs w-full"
-                                  value={editValues.title || ''}
-                                  onChange={(e) => setEditValues({ ...editValues, title: e.target.value })}
-                                />
-                              </td>
-                              <td className="py-3">
-                                <input
-                                  className="input-field text-xs w-full"
-                                  value={editValues.epic || ''}
-                                  onChange={(e) => setEditValues({ ...editValues, epic: e.target.value })}
-                                />
-                              </td>
-                              <td className="py-3">
-                                <input
-                                  className="input-field text-xs w-full"
-                                  value={editValues.role || ''}
-                                  onChange={(e) => setEditValues({ ...editValues, role: e.target.value })}
-                                />
-                              </td>
-                              <td className="py-3">
-                                <select
-                                  className="input-field text-xs"
-                                  value={editValues.moscow || 'Should'}
-                                  onChange={(e) => setEditValues({ ...editValues, moscow: e.target.value })}
-                                >
-                                  <option>Must</option><option>Should</option><option>Could</option><option>Won't</option>
-                                </select>
-                              </td>
-                              <td className="py-3">
-                                <input
-                                  className="input-field text-xs w-16"
-                                  type="number"
-                                  value={editValues.points || 0}
-                                  onChange={(e) => setEditValues({ ...editValues, points: parseInt(e.target.value) || 0 })}
-                                />
-                              </td>
-                              <td className="py-3">
-                                <select
-                                  className="input-field text-xs"
-                                  value={editValues.status || 'todo'}
-                                  onChange={(e) => setEditValues({ ...editValues, status: e.target.value })}
-                                >
-                                  <option>todo</option><option>in-progress</option><option>review</option><option>done</option>
-                                </select>
-                              </td>
-                              <td className="py-3">
-                                <div className="flex gap-1">
-                                  <button onClick={saveEdit} className="p-1 rounded hover:bg-dark-surface text-status-success"><Save className="h-3.5 w-3.5" /></button>
-                                  <button onClick={cancelEdit} className="p-1 rounded hover:bg-dark-surface text-status-error"><Clock className="h-3.5 w-3.5" /></button>
-                                </div>
-                              </td>
-                            </>
-                          ) : (
-                            <>
-                              <td className="py-3 text-xs font-mono text-text-muted">{story.id}</td>
-                              <td className="py-3 text-sm text-text-primary max-w-xs truncate">{story.title}</td>
-                              <td className="py-3 text-xs text-text-secondary">{story.epic}</td>
-                              <td className="py-3 text-xs text-text-muted">{story.role}</td>
-                              <td className="py-3">
-                                <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
-                                  story.moscow === 'Must' ? 'bg-status-error/10 text-status-error'
-                                  : story.moscow === 'Should' ? 'bg-status-warning/10 text-status-warning'
-                                  : story.moscow === 'Could' ? 'bg-status-info/10 text-status-info'
-                                  : 'bg-dark-border text-text-muted'
-                                }`}>{story.moscow}</span>
-                              </td>
-                              <td className="py-3 text-xs text-text-secondary">{story.points}</td>
-                              <td className="py-3">
-                                <StatusBadge status={
-                                  story.status === 'done' ? 'success'
-                                  : story.status === 'in-progress' ? 'running'
-                                  : story.status === 'review' ? 'warning'
-                                  : 'pending'
-                                }>{story.status}</StatusBadge>
-                              </td>
-                              <td className="py-3">
-                                <button onClick={() => startEdit(story)} className="p-1 rounded hover:bg-dark-surface text-text-muted hover:text-ey-yellow">
-                                  <Edit3 className="h-3.5 w-3.5" />
-                                </button>
-                              </td>
-                            </>
-                          )}
+                          <td className="py-3 text-xs font-mono text-text-muted">{story.id}</td>
+                          <td className="py-3 text-sm text-text-primary max-w-xs truncate">{story.title}</td>
+                          <td className="py-3 text-xs text-text-secondary">{story.epic}</td>
+                          <td className="py-3 text-xs text-text-muted">{story.role}</td>
+                          <td className="py-3">
+                            <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
+                              story.moscow === 'Must' ? 'bg-status-error/10 text-status-error'
+                              : story.moscow === 'Should' ? 'bg-status-warning/10 text-status-warning'
+                              : story.moscow === 'Could' ? 'bg-status-info/10 text-status-info'
+                              : 'bg-dark-border text-text-muted'
+                            }`}>{story.moscow}</span>
+                          </td>
+                          <td className="py-3 text-xs text-text-secondary">{story.points}</td>
+                          <td className="py-3">
+                            <StatusBadge status={
+                              story.status === 'done' ? 'success'
+                              : story.status === 'in-progress' ? 'running'
+                              : story.status === 'review' ? 'warning'
+                              : 'pending'
+                            }>{story.status}</StatusBadge>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -605,8 +521,18 @@ try {
                         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-ey-yellow/10">
                           <Users className="h-4 w-4 text-ey-yellow" />
                         </div>
-                        <div>
-                          <h3 className="text-sm font-semibold text-text-primary">{persona.name}</h3>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <h3 className="text-sm font-semibold text-text-primary">{persona.name}</h3>
+                            {persona.isDerived && (
+                              <span
+                                className="text-[9px] px-1.5 py-0.5 rounded-full bg-dark-border text-text-muted"
+                                title="Derived from the story role, not generated by the Business Analyst agent"
+                              >
+                                Derived from stories
+                              </span>
+                            )}
+                          </div>
                           <p className="text-[10px] text-text-muted">{persona.role}</p>
                         </div>
                       </div>

@@ -199,8 +199,11 @@ const steps = [
 ];
 
 function getStepDestination(mode: string | null, step: number): number {
-  if (mode === 'auto' && step === 3) return 4;
-  return step + 1;
+  // Auto mode has no Deliverables step (step 3) UI to show — skip over it
+  // both when landing on it from step 2 and when leaving it directly.
+  const next = step + 1;
+  if (mode === 'auto' && next === 3) return 4;
+  return next;
 }
 
 function getBackDestination(mode: string | null, step: number): number {

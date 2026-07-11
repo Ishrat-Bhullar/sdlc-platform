@@ -25,7 +25,7 @@ Consolidation notes (why this file looks the way it does):
 from __future__ import annotations
 
 import json
-import logging
+from ...logging_config import get_logger
 from typing import Any
 
 from ..llm_service import LLMService
@@ -33,7 +33,7 @@ from ..business_analyst.schemas import BusinessAnalystOutput
 from .prompts import DATABASE_CHAT_PROMPT, DATABASE_SYSTEM_PROMPT
 from .schemas import DatabaseSchemaOutput, SchemaChatOutput, SUPPORTED_DB_TYPES
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------

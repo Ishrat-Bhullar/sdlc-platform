@@ -12,7 +12,7 @@ the agents/<name>/ architectural refactor -- content unchanged.
 """
 from __future__ import annotations
 
-import logging
+from ...logging_config import get_logger
 
 from pydantic import BaseModel, Field
 
@@ -20,7 +20,7 @@ from ..llm_service import LLMService
 from .prompts import STORYTELLING_SYSTEM_PROMPT
 from .schemas import cap
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class StorySpine(BaseModel):

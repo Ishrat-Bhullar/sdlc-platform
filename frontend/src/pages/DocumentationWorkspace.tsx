@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { motion } from 'framer-motion';
 import {
   FileText,
   BookOpen,
@@ -10,11 +9,11 @@ import {
   AlertTriangle,
   RefreshCw,
   Eye,
-  Copy,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Card, StatusBadge } from '../components/ui/Card';
 import { Accordion, AccordionItem } from '../components/ui/Accordion';
 import { Markdown } from '../components/ui/Markdown';
+import { RegenerateButton } from '../components/ui/RegenerateButton';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
 import type { DocumentationContent } from '../types/unified';
@@ -86,10 +85,20 @@ export function DocumentationWorkspace() {
   if (!documentation) {
     return (
       <div className="space-y-6">
-        <Card className="py-10 text-center">
+        <Card className="py-10 text-center space-y-3">
           <FileText className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
           <p className="text-sm text-text-muted">No documentation generated yet.</p>
           <p className="text-xs text-text-muted mt-1">Run the Documentation Agent to generate project documentation.</p>
+          {projectId && (
+            <RegenerateButton
+              projectId={projectId}
+              agentName="Documentation Agent"
+              onRegenerated={reload}
+              label="Generate"
+              className="btn-primary text-sm"
+              align="center"
+            />
+          )}
         </Card>
       </div>
     );
@@ -114,6 +123,9 @@ export function DocumentationWorkspace() {
             {documentation.status === 'generated' ? <CheckCircle2 className="mr-1 h-3 w-3" /> : <AlertTriangle className="mr-1 h-3 w-3" />}
             {documentation.status || 'Pending'}
           </StatusBadge>
+          {projectId && (
+            <RegenerateButton projectId={projectId} agentName="Documentation Agent" onRegenerated={reload} />
+          )}
           <button onClick={reload} className="btn-ghost text-sm" disabled={loading}>
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh

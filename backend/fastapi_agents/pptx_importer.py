@@ -18,13 +18,13 @@ brand marks) are excluded from the body content entirely.
 from __future__ import annotations
 
 import io
-import logging
+from .logging_config import get_logger
 import re
 from typing import Any
 
 from pptx import Presentation
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Shapes whose top edge falls in the bottom 8% of the slide are treated as
 # footer/page-number/brand-mark noise, never real slide content.

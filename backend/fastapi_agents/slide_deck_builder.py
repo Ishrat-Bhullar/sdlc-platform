@@ -8,10 +8,10 @@ dicts consumed by PillowSlideRenderer.
 from __future__ import annotations
 
 import json
-import logging
+from .logging_config import get_logger
 from typing import Any, Dict, List
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _safe_list(obj: Any, key: str = "", default: list = None) -> list:

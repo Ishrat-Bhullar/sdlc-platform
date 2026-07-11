@@ -69,12 +69,12 @@ from . import agent_runner as _agent_runner
 
 
 from pydantic import BaseModel as _BaseModel
-import logging
+from .logging_config import get_logger
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-logger = logging.getLogger("sdlc.main_extension")
+logger = get_logger("sdlc.main_extension")
 
 # ── existing app / auth helpers ─────────────────────────────────────────────
 from .main import get_current_user, get_db, encrypt_secret
@@ -140,6 +140,7 @@ from .models_extension import (
     ProviderTestRequest,
     ReviewRequest,
     ReviewResponse,
+    SelectedDesignUpdateRequest,
 )
 
 # ── AI service and WebSocket manager ─────────────────────────────────────────
@@ -214,17 +215,25 @@ def jira_import(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """
-    Simulates a Jira import for the demo.  When a real Jira instance is
-    reachable and the token is valid, the handler should call the Jira REST
-    API (GET /rest/api/3/search) and persist the results as generated
-    artifacts.  For the Friday demo, we return a realistic mock response
-    and store a summary artifact.
+    Real Jira integration is not implemented — the handler should call the
+    Jira REST API (GET /rest/api/3/search) and persist the results as
+    generated artifacts. Outside DEMO_MODE this must never fabricate epics/
+    stories and pass them off as a real import.
     """
+    from .models import DEMO_MODE
+
     _get_project_or_404(db, payload.target_project_id)
 
-    # Demo: build representative mock artifacts from the Jira payload shape
-    mock_epics = ["User Authentication", "Account Management", "Transaction Management"]
-    mock_stories = [
+    if not DEMO_MODE:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Jira import is not implemented. Set DEMO_MODE=true to use the demo fixture, "
+                   "or connect a real Jira instance.",
+        )
+
+    # DEMO_MODE only: representative fixture data, clearly not a real import.
+    demo_epics = ["User Authentication", "Account Management", "Transaction Management"]
+    demo_stories = [
         "As a customer, I want to log in with email and password",
         "As a customer, I want to view my account balances",
         "As a customer, I want to filter my transaction history by date",
@@ -233,9 +242,10 @@ def jira_import(
     summary = {
         "jira_url": payload.jira_url,
         "project_key": payload.project_key,
-        "epics": mock_epics,
-        "stories": mock_stories,
+        "epics": demo_epics,
+        "stories": demo_stories,
         "imported_at": datetime.now(timezone.utc).isoformat(),
+        "demo_mode": True,
     }
 
     artifact = _save_artifact(db, payload.target_project_id, ArtifactType.USER_STORIES.value, json.dumps(summary))
@@ -247,8 +257,8 @@ def jira_import(
     db.commit()
 
     return {
-        "stories_imported": len(mock_stories),
-        "epics_imported": len(mock_epics),
+        "stories_imported": len(demo_stories),
+        "epics_imported": len(demo_epics),
         "artifacts_created": 1,
         "project_id": payload.target_project_id,
     }
@@ -1146,6 +1156,45 @@ async def decide_approval(
     }
 
 
+@router.put("/projects/{project_id}/uiux/selected-design", tags=["approvals"])
+def update_selected_design(
+    project_id: int,
+    payload: SelectedDesignUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Persists Design Canvas edits (component insert/remove/reorder/rename,
+    made in the UI/UX Studio tab after a style was already selected) into
+    the selected design the Frontend Agent will build from — so those edits
+    actually reach generation instead of staying local-only browser state.
+
+    Reuses the exact same versioned-artifact mechanism as everything else
+    in this app: a new GeneratedArtifact row is appended (never mutated in
+    place), and agent_runner._build_context already always queries the
+    LATEST "selected_ui_style" row by created_at — so no other code needs
+    to change for this update to take effect on the Frontend Agent's next
+    run. No new persistence concept, no pipeline/orchestration change.
+    """
+    _get_project_or_404(db, project_id)
+
+    existing = _latest_artifact(db, project_id, "selected_ui_style")
+    if existing is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No selected design yet for this project — choose a UI style first.",
+        )
+
+    _save_artifact(db, project_id, "selected_ui_style", json.dumps(payload.design, ensure_ascii=False))
+    db.add(TimelineEvent(
+        project_id=project_id,
+        stage="Selected UI Design Updated",
+        status=RunStatus.COMPLETED.value,
+    ))
+    db.commit()
+
+    return {"project_id": project_id, "saved": True}
+
+
 # ===========================================================================
 # SECTION 14 — AI Review Copilot
 # ===========================================================================
@@ -1781,23 +1830,10 @@ def list_mcp_integrations(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[MCPIntegration]:
+    # No auto-seeding — an empty list is the honest state for a project with
+    # no configured integrations yet. The UI's empty state offers "Add
+    # Integration" (POST below) rather than showing fabricated connections.
     integrations = db.query(MCPIntegration).order_by(MCPIntegration.name.asc()).all()
-
-    # Seed default integrations on first call so the UI has something to show
-    if not integrations:
-        defaults = [
-            MCPIntegration(name="GitHub",      type="version-control",        status="connected",    latency_ms=45,  connected_agents=["Frontend Agent", "Backend Agent", "Code Review Agent"]),
-            MCPIntegration(name="Jira",        type="issue-tracking",         status="connected",    latency_ms=120, connected_agents=["Requirement Agent", "Business Analyst Agent"]),
-            MCPIntegration(name="AWS",         type="cloud-infrastructure",   status="connected",    latency_ms=89,  connected_agents=["Code Review Agent"]),
-            MCPIntegration(name="Confluence",  type="documentation",          status="syncing",      latency_ms=150, connected_agents=["Business Analyst Agent"]),
-            MCPIntegration(name="PostgreSQL",  type="database",               status="connected",    latency_ms=12,  connected_agents=["Database Agent", "Backend Agent"]),
-            MCPIntegration(name="ServiceNow",  type="it-service-management",  status="disconnected", latency_ms=0,   connected_agents=[]),
-            MCPIntegration(name="Azure",       type="cloud-infrastructure",   status="error",        latency_ms=0,   connected_agents=[]),
-        ]
-        for d in defaults:
-            db.add(d)
-        db.commit()
-        integrations = db.query(MCPIntegration).order_by(MCPIntegration.name.asc()).all()
 
     return [
         MCPIntegrationOut(
@@ -2104,6 +2140,16 @@ class UIUXRequest(_BaseModel):
     project_description: str
     requirements: dict | None = None
     user_stories: dict | None = None
+    # Optional: when project_id is supplied, the generated/refined design is
+    # persisted as a `uiux_design` GeneratedArtifact row (same table/type the
+    # pipeline already writes to) so the UI/UX Design Studio's manual
+    # "Generate"/"Refine with AI" actions land in the same place
+    # useUnifiedArtifacts().getUIUXDesign() already reads from.
+    project_id: int | None = None
+    # Optional: when both are supplied, the agent revises existing_design per
+    # refinement_instruction instead of generating a fresh design from scratch.
+    refinement_instruction: str | None = None
+    existing_design: dict | None = None
 
 
 class SecurityRequest(_BaseModel):
@@ -2131,13 +2177,25 @@ async def run_uiux_agent(
     component recommendations, and UX best practices.
     """
     try:
-        agent = UIUXDesignAgent()
+        agent = UIUXDesignAgent(db=db, project_id=request.project_id)
         result = agent.run(
             project_description=request.project_description,
             requirements=request.requirements,
-            user_stories=request.user_stories
+            user_stories=request.user_stories,
+            refinement_instruction=request.refinement_instruction,
+            existing_design=request.existing_design,
         )
-        return result.model_dump()
+        result_dict = result.model_dump()
+        if request.project_id is not None:
+            # _save_artifact only flushes (adds to the pending transaction) —
+            # without an explicit commit, get_db()'s teardown (db.close())
+            # silently rolls this back, so every Studio Generate/Refine call
+            # would return a design to the browser but never persist it. No
+            # other code path in this handler commits, unlike the pipeline's
+            # _execute_agent, so this was needed here specifically.
+            _save_artifact(db, request.project_id, ArtifactType.UIUX_DESIGN.value, json.dumps(result_dict))
+            db.commit()
+        return result_dict
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"UI/UX Agent error: {str(e)}")
 

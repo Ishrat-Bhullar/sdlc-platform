@@ -1,34 +1,41 @@
 import { useState } from 'react';
-import { motion } from 'framer-motion';
 import {
   Shield,
   AlertTriangle,
   Lock,
-  Eye,
-  Users,
   CheckCircle2,
-  Download,
   FileJson,
   FileType,
   RefreshCw,
 } from 'lucide-react';
-import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
+import { Card, StatusBadge } from '../components/ui/Card';
+import { ApprovalBadge, ApprovalBanner } from '../components/ui/ApprovalStatus';
+import { RegenerateButton } from '../components/ui/RegenerateButton';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
+import { useAgentStatus } from '../lib/AgentStatusService';
+import { checkpointGateStatus } from '../lib/checkpointStatus';
 import { getSelectedProjectId } from '../lib/projectContext';
+import { artifactToMarkdown } from '../lib/toMarkdown';
 import type { SecurityReportContent } from '../types/unified';
 
 export function SecurityWorkspace() {
   const [activeTab, setActiveTab] = useState<'architecture' | 'threats' | 'auth' | 'controls'>('architecture');
   const projectId = getSelectedProjectId();
   const { getSecurityReport, loading, error, reload, downloadArtifact } = useUnifiedArtifacts(projectId);
+  const { stages } = useAgentStatus();
 
   const security = getSecurityReport();
+  // Security has no per-artifact Approval row of its own (see checkpointStatus.ts) —
+  // its review gate is Human Checkpoint 2.
+  const approvalStatus = checkpointGateStatus(stages, 'Security Architect Agent', 'Human Review 2');
 
   const handleExport = async (format: 'json' | 'md') => {
     if (!projectId || !security) return;
     try {
-      const content = JSON.stringify(security, null, 2);
-      const blob = new Blob([content], { type: 'application/json' });
+      const content = format === 'md'
+        ? artifactToMarkdown('Security Report', security as unknown as Record<string, unknown>)
+        : JSON.stringify(security, null, 2);
+      const blob = new Blob([content], { type: format === 'md' ? 'text/markdown' : 'application/json' });
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = blobUrl;
@@ -82,10 +89,20 @@ export function SecurityWorkspace() {
   if (!security) {
     return (
       <div className="space-y-6">
-        <Card className="py-10 text-center">
+        <Card className="py-10 text-center space-y-3">
           <Shield className="h-10 w-10 text-dark-border-light mx-auto mb-3" />
           <p className="text-sm text-text-muted">No security report generated yet.</p>
           <p className="text-xs text-text-muted mt-1">Run the Security Architect Agent to generate security architecture and threat model.</p>
+          {projectId && (
+            <RegenerateButton
+              projectId={projectId}
+              agentName="Security Architect Agent"
+              onRegenerated={reload}
+              label="Generate"
+              className="btn-primary text-sm"
+              align="center"
+            />
+          )}
         </Card>
       </div>
     );
@@ -111,6 +128,10 @@ export function SecurityWorkspace() {
             <CheckCircle2 className="mr-1 h-3 w-3" />
             Report Generated
           </StatusBadge>
+          <ApprovalBadge status={approvalStatus} />
+          {projectId && (
+            <RegenerateButton projectId={projectId} agentName="Security Architect Agent" onRegenerated={reload} />
+          )}
           <button onClick={reload} className="btn-ghost text-sm" disabled={loading}>
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
@@ -125,6 +146,11 @@ export function SecurityWorkspace() {
           </div>
         </div>
       </div>
+
+      <ApprovalBanner
+        status={approvalStatus}
+        note="Review this security report, then approve Human Checkpoint 2 in the Approval Center."
+      />
 
       {/* Metrics row */}
       <div className="grid gap-3 md:grid-cols-4">

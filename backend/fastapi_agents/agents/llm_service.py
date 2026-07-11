@@ -34,7 +34,7 @@ param), which is handled by a dedicated branch there.
 from __future__ import annotations
 
 import json
-import logging
+from ..logging_config import get_logger
 import os
 import re
 import time
@@ -46,7 +46,7 @@ from pydantic import BaseModel, ValidationError
 
 from .llm_client import AgentOutputParsingError, OllamaClient
 
-logger = logging.getLogger("sdlc.llm_service")
+logger = get_logger("sdlc.llm_service")
 
 # Seeded demo rows use this sentinel as a placeholder key — never treat it as
 # a real, usable credential (mirrors the check ai_service.py used to do).

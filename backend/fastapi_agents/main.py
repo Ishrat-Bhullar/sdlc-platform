@@ -48,8 +48,12 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 # `logging.getLogger(...).info(...)` call in this codebase (e.g.
 # llm_service.py's "request served by <provider>" line, added specifically
 # so provider routing can be verified via the server log) is silently
-# dropped. Configuring the root logger here makes all of it visible.
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# dropped. configure_logging() attaches both a console handler and a
+# RotatingFileHandler (logs/sdlc.log) to the root logger, so every module's
+# logger — however it was obtained — ends up going to both places.
+from .logging_config import configure_logging  # noqa: E402
+
+configure_logging()
 
 import jwt
 from cryptography.fernet import Fernet

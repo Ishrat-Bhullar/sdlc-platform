@@ -17,7 +17,7 @@ import { Card, StatusBadge, ProgressBar } from '../components/ui/Card';
 import { useUnifiedArtifacts } from '../lib/useUnifiedArtifacts';
 import { getSelectedProjectId } from '../lib/projectContext';
 import { apiRequest } from '../lib/api';
-import type { Approval, ArtifactType } from '../types/unified';
+import type { Approval } from '../types/unified';
 
 export function ApprovalCenter() {
   const [activeTab, setActiveTab] = useState<'pending' | 'all' | 'history'>('pending');
@@ -31,46 +31,31 @@ export function ApprovalCenter() {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [loadingApprovals, setLoadingApprovals] = useState(false);
 
-  // Load approvals from API
-  useEffect(() => {
+  // Load approvals from API. /workflow/all-approvals returns every Approval
+  // row regardless of status (pending/approved/rejected) — using the
+  // pending-only endpoint here meant the "History"/"All" tabs and the
+  // Approved/Rejected counters were permanently empty, since GeneratedArtifactOut
+  // (what the artifacts-derived fallback below relied on) has no
+  // approval_status field for the fallback to ever match on.
+  const loadApprovals = useMemo(() => async () => {
     if (!projectId) return;
-    
-    const loadApprovals = async () => {
-      setLoadingApprovals(true);
-      try {
-        const data = await apiRequest<Approval[]>(`/workflow/pending-approvals?project_id=${projectId}`);
-        setApprovals(data || []);
-      } catch (e) {
-        console.error('Failed to load approvals:', e);
-      } finally {
-        setLoadingApprovals(false);
-      }
-    };
-
-    loadApprovals();
+    setLoadingApprovals(true);
+    try {
+      const data = await apiRequest<Approval[]>(`/workflow/all-approvals?project_id=${projectId}`);
+      setApprovals(data || []);
+    } catch (e) {
+      console.error('Failed to load approvals:', e);
+    } finally {
+      setLoadingApprovals(false);
+    }
   }, [projectId]);
 
-  // Derive approvals from artifacts if API doesn't return them
-  const derivedApprovals = useMemo(() => {
-    if (approvals.length > 0) return approvals;
-    
-    // Create approval records from artifacts with approval status
-    return artifacts
-      .filter(a => a.approval_status && a.approval_status !== 'Draft Generated')
-      .map(a => ({
-        id: a.id,
-        project_id: a.project_id,
-        artifact_type: a.artifact_type as ArtifactType,
-        status: a.approval_status as any,
-        approved_by: null,
-        comments: null,
-        notes: null,
-        created_at: a.created_at,
-      } as Approval));
-  }, [approvals, artifacts]);
+  useEffect(() => {
+    loadApprovals();
+  }, [loadApprovals]);
 
   const filteredApprovals = useMemo(() => {
-    let filtered = derivedApprovals;
+    let filtered = approvals;
     
     // Filter by tab
     if (activeTab === 'pending') {
@@ -94,11 +79,11 @@ export function ApprovalCenter() {
     }
     
     return filtered;
-  }, [derivedApprovals, activeTab, filterType, searchQuery]);
+  }, [approvals, activeTab, filterType, searchQuery]);
 
-  const pendingCount = derivedApprovals.filter(a => a.status === 'Pending Approval').length;
-  const approvedCount = derivedApprovals.filter(a => a.status === 'Approved').length;
-  const rejectedCount = derivedApprovals.filter(a => a.status === 'Rejected').length;
+  const pendingCount = approvals.filter(a => a.status === 'Pending Approval').length;
+  const approvedCount = approvals.filter(a => a.status === 'Approved').length;
+  const rejectedCount = approvals.filter(a => a.status === 'Rejected').length;
 
   const handleApprove = async (approvalId: string) => {
     if (!projectId) return;
@@ -108,9 +93,7 @@ export function ApprovalCenter() {
         body: { decision: 'approved', comments: 'Approved from Approval Center' }
       });
       reload();
-      // Reload approvals
-      const data = await apiRequest<Approval[]>(`/workflow/pending-approvals?project_id=${projectId}`);
-      setApprovals(data || []);
+      await loadApprovals();
     } catch (e) {
       console.error('Failed to approve:', e);
     }
@@ -124,9 +107,7 @@ export function ApprovalCenter() {
         body: { decision: 'rejected', comments: 'Rejected from Approval Center' }
       });
       reload();
-      // Reload approvals
-      const data = await apiRequest<Approval[]>(`/workflow/pending-approvals?project_id=${projectId}`);
-      setApprovals(data || []);
+      await loadApprovals();
     } catch (e) {
       console.error('Failed to reject:', e);
     }

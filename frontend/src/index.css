@@ -171,3 +171,10 @@
     transform: scale(1);
   }
 }
+
+/* Indeterminate progress sweep — used where a real running state exists but
+   no backend-tracked completion percentage does, instead of fabricating one. */
+@keyframes indeterminate {
+  0% { left: -33%; }
+  100% { left: 100%; }
+}

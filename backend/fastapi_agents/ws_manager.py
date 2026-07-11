@@ -23,13 +23,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
+from .logging_config import get_logger
 from collections import defaultdict
 from datetime import datetime
 
 from fastapi import WebSocket
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _json_default(obj):

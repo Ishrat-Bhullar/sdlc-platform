@@ -14,7 +14,7 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type SlideLayout = 'title' | 'content' | 'two_column' | 'quote' | 'metric' | 'closing';
+type SlideLayout = 'title' | 'content' | 'two_column' | 'quote' | 'metric' | 'closing' | 'kpi_cards' | 'roadmap';
 type ThemeId = 'ey_dark' | 'ey_light' | 'mckinsey' | 'minimal' | 'government' | 'startup' | 'healthcare';
 type GenMode = 'presentation_only' | 'video_only' | 'presentation_video';
 type VoiceId = 'samantha' | 'alex' | 'victoria' | 'daniel' | 'karen' | 'moira' | 'tom';
@@ -488,7 +488,7 @@ function TimelineEditor({ slides, onDurationChange }: { slides: Slide[]; onDurat
 // ─── Export panel ─────────────────────────────────────────────────────────────
 
 function ExportPanel({ projectId, videoArtifactId, slides, onClose }: {
-  projectId: number | null; videoArtifactId: number | null; slides: Slide[]; onClose: () => void;
+  projectId: string | null; videoArtifactId: number | string | null; slides: Slide[]; onClose: () => void;
 }) {
   const downloadNotes = () => {
     const text = slides.map((s, i) => `Slide ${i+1}: ${s.title}\n${s.speaker_notes || '(no notes)'}`).join('\n\n---\n\n');
@@ -529,7 +529,7 @@ function ExportPanel({ projectId, videoArtifactId, slides, onClose }: {
 // ─── Diagram generator ────────────────────────────────────────────────────────
 
 function DiagramGenerator({ projectId, onClose, onInsert }: {
-  projectId: number | null; onClose: () => void; onInsert: (code: string) => void;
+  projectId: string | null; onClose: () => void; onInsert: (code: string) => void;
 }) {
   const [type, setType] = useState('architecture');
   const [generating, setGenerating] = useState(false);
@@ -979,29 +979,34 @@ export function VideoGenerationWorkspace() {
         return;
       }
 
-      // Add ROI slide
+      // Insert a template ROI slide — this is a deterministic, hardcoded
+      // starter layout (not an AI-generated or project-specific business
+      // case), so both the inserted content and the chat reply say so
+      // explicitly rather than implying the numbers were computed for this
+      // engagement.
       if (/\badd\b.*\broi\b|\broi slide\b|return on investment/.test(lc)) {
-        const roi: Slide = { id: Date.now().toString(), title: 'The platform pays back within the first quarter',
+        const roi: Slide = { id: Date.now().toString(), title: '[Placeholder] Business case — replace with your figures',
           subtitle: '', layout: 'kpi_cards',
-          content: '70% — Faster delivery\n3.2x — Return on investment\n85% — Automated coverage\n60% — Lower delivery cost',
-          speaker_notes: 'The business case is compelling. Seventy percent faster delivery, a three-point-two-times return on investment, and sixty percent lower delivery cost mean the platform pays for itself within the first quarter.',
+          content: '[XX]% — Faster delivery\n[X.X]x — Return on investment\n[XX]% — Automated coverage\n[XX]% — Lower delivery cost',
+          speaker_notes: 'Template only — these are placeholder figures, not computed for this engagement. Replace each bracketed value with the real numbers from this project\'s business case before presenting.',
           duration: 30 };
         setSlides(prev => { const n=[...prev]; n.splice(activeIdx+1,0,roi); return n; });
         setActiveIdx(activeIdx+1);
-        say('✓ Added an ROI slide with quantified business value. Edit the numbers to match your engagement.');
+        say('✓ Inserted a template ROI slide layout. The figures are placeholders, not computed for this project — replace them with your real numbers before presenting.');
         return;
       }
 
-      // Add implementation roadmap
+      // Insert a template implementation-roadmap slide — same deterministic
+      // starter-layout pattern as the ROI slide above, not AI-generated.
       if (/\badd\b.*(roadmap|implementation|timeline|phases)/.test(lc)) {
-        const rm: Slide = { id: Date.now().toString(), title: 'A phased implementation with a governance gate at each milestone',
+        const rm: Slide = { id: Date.now().toString(), title: '[Placeholder] Phased implementation roadmap',
           subtitle: '', layout: 'roadmap',
           content: 'Discovery — Requirements & alignment\nDesign — Architecture & data\nBuild — Core development\nAssure — Security, QA, UAT\nGo-Live — Production & stabilise',
-          speaker_notes: 'Delivery is phased. We move from discovery and alignment, through design and build, into assurance, and finally go-live — with a governance gate at every milestone so stakeholders stay in control.',
+          speaker_notes: 'Template only — these are generic starter phases, not generated for this project. Adjust the phase names and gates to match this engagement\'s actual delivery plan.',
           duration: 32 };
         setSlides(prev => { const n=[...prev]; n.splice(activeIdx+1,0,rm); return n; });
         setActiveIdx(activeIdx+1);
-        say('✓ Added an implementation roadmap slide with five phases and governance gates.');
+        say('✓ Inserted a template implementation-roadmap slide. Customize the phases for this project before presenting.');
         return;
       }
 

@@ -11,7 +11,7 @@ part of the agents/<name>/ architectural refactor -- content unchanged.
 """
 from __future__ import annotations
 
-import logging
+from ...logging_config import get_logger
 
 from pydantic import BaseModel, Field
 
@@ -21,7 +21,7 @@ from .prompts import AVATAR_SCRIPT_SYSTEM_PROMPT
 from .schemas import VideoFrame, cap
 from .storytelling import StorySpine
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class AvatarSceneScript(BaseModel):

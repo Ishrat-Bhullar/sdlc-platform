@@ -22,12 +22,12 @@ theme_engine.NARRATIVE_ARC.
 """
 from __future__ import annotations
 
-import logging
+from .logging_config import get_logger
 from typing import Any
 
 from fastapi_agents import theme_engine as TE
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Which layouts warrant a diagram / chart / longer dwell.
 _DIAGRAM_FOR = {"architecture": "architecture", "process": "workflow",

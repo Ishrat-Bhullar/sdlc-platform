@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import logging
+from .logging_config import get_logger
 import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)

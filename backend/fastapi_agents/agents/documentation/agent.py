@@ -9,14 +9,14 @@ only ever calls `.generate(...)`.
 """
 from __future__ import annotations
 
-import logging
+from ...logging_config import get_logger
 from typing import Any
 
 from ..llm_service import LLMService
 from .prompts import DOCUMENTATION_SYSTEM_PROMPT
 from .schemas import DocumentationPlanOutput
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------

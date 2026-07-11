@@ -18,7 +18,7 @@ from __future__ import annotations
 import base64
 import io
 import json
-import logging
+from .logging_config import get_logger
 import os
 import re
 import shutil
@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ── torchvision/basicsr compatibility shim ──────────────────────────────────
 # `basicsr` (an unmaintained transitive dependency pulled in by gfpgan, which
