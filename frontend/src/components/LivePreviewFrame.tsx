@@ -167,7 +167,26 @@ export function LivePreviewFrame({ files }: LivePreviewFrameProps) {
   const [error, setError] = useState<string | null>(null);
   const [compiling, setCompiling] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const entryFile = useMemo(() => pickEntryFile(files), [files]);
+
+  // `files` arrives freshly parsed (JSON.parse'd from the artifact) on every
+  // render of the parent — a new array/object reference each time even when
+  // the underlying generated code hasn't changed at all. Deriving a
+  // content-based string signature and keying the memo/effect below on that
+  // (instead of on `files`/`entryFile` object identity) makes them skip
+  // recomputation whenever the actual content is unchanged: JS compares
+  // strings by value, not reference, so two independently-parsed-but-
+  // identical `files` arrays produce the exact same signature string.
+  // Without this, the iframe's `srcdoc` was being reassigned (reloading the
+  // whole preview, wiping focus/typed state) on almost every parent
+  // re-render — confirmed via a load-event counter firing dozens of times
+  // per second — which is what made the preview look "rendered but
+  // uninteractive": a click or keystroke lands, then the frame reloads out
+  // from under it before the next paint.
+  const filesSignature = useMemo(
+    () => files.map((f) => `${f.name}:${f.content}`).join(' '),
+    [files]
+  );
+  const entryFile = useMemo(() => pickEntryFile(files), [filesSignature]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let cancelled = false;
@@ -258,7 +277,10 @@ try {
       });
 
     return () => { cancelled = true; };
-  }, [entryFile]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally
+    // keyed on the content-based signature, not `entryFile`'s object
+    // identity; see the comment above `filesSignature` for why.
+  }, [filesSignature]);
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
